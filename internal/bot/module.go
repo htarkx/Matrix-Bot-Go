@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/alert"
+	"github.com/htarkx/Matrix-Bot-Go/internal/matrix"
 	"github.com/htarkx/Matrix-Bot-Go/internal/message"
 )
 
@@ -27,6 +28,19 @@ type Env struct {
 	BotID  string
 	Log    *slog.Logger
 	Alerts AlertView
+	// Matrix is the bot's own Matrix identity; nil when the bot has no Matrix.
+	Matrix *matrix.Identity
+	// Secret reads a credential file by name (systemd LoadCredential). It
+	// returns "" without error in dry-run and check-config mode.
+	Secret func(name string) (string, error)
+}
+
+// Summarizer is optionally implemented by a module that has something to
+// say on the dashboard command: a few short lines, each starting with a
+// label ("聊天  …"). Summary should answer from cached data where it can;
+// the dashboard gives every module a few seconds.
+type Summarizer interface {
+	Summary(ctx context.Context) ([]string, error)
 }
 
 // AlertView is the read side of the bot's alert engine.

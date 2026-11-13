@@ -12,7 +12,8 @@
       "admin": "@admin:example.org",
       "rooms": {
         "alerts": {"alias": "watch-alerts", "name": "edge-1 告警"},
-        "query": {"alias": "watch", "name": "edge-1 查询", "retention": "12h"}
+        "query": {"alias": "watch", "name": "edge-1 查询", "retention": "12h"},
+        "command_rooms": ["admins"]
       },
       "telegram": {"chat_id": 123456789, "commands": true},
       "alerts": {"interval": "30s", "sustain": "60s", "remind": "6h"},
@@ -22,6 +23,7 @@
           "disks": ["/"],
           "net_interface": "eth0",
           "net_refresh": "1m",
+          "monthly_quota_gb": 1000,
           "thresholds": {
             "cpu_busy_pct": 85, "cpu_window": "10m",
             "swap_io_pages_per_s": 25, "swap_window": "5m",
@@ -32,7 +34,11 @@
           "units": ["tuwunel", "nginx"],
           "backups": {"db": "2h"},
           "backup_unit": "edge-backup@%s.service"
-        }
+        },
+        "homeserver": {"hide_users": ["watch"]},
+        "b2": {"refresh": "1h"},
+        "livekit": {"url": "http://127.0.0.1:7880"},
+        "certs": {"hosts": ["matrix.example.org", "rtc.example.org"], "connect": "127.0.0.1:443", "warn_days": 14}
       }
     }
   ]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/human"
@@ -12,17 +13,68 @@ import (
 
 // builtinCommands are present in every bot, after the modules' commands.
 func (b *Bot) builtinCommands() []Command {
-	return []Command{
-		{Name: "alerts", Aliases: []string{"a"}, Help: "当前告警", Run: b.cmdAlerts},
-		{Name: "help", Aliases: []string{"h", "?"}, Help: "指令列表", Run: b.cmdHelp},
+	var cmds []Command
+	if len(b.summarizers) > 0 {
+		cmds = append(cmds, Command{Name: "dashboard", Aliases: []string{"d"}, Help: "总览", Run: b.cmdDashboard})
 	}
+	return append(cmds,
+		Command{Name: "alerts", Aliases: []string{"a"}, Help: "当前告警", Run: b.cmdAlerts},
+		Command{Name: "help", Aliases: []string{"h", "?"}, Help: "指令列表", Run: b.cmdHelp},
+	)
+}
+
+// namedSummarizer is a module's dashboard section.
+type namedSummarizer struct {
+	name string
+	s    Summarizer
+}
+
+// summaryTimeout bounds each module's dashboard section.
+const summaryTimeout = 8 * time.Second
+
+// cmdDashboard asks every summarizing module at once and keeps module order.
+func (b *Bot) cmdDashboard(ctx context.Context, _ Request) (message.Message, error) {
+	parts := make([][]string, len(b.summarizers))
+	var wg sync.WaitGroup
+	for i, ns := range b.summarizers {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(ctx, summaryTimeout)
+			defer cancel()
+			lines, err := safeSummary(ns.s, ctx)
+			if err != nil {
+				b.log.Warn("dashboard section failed", "module", ns.name, "err", err)
+				lines = []string{ns.name + "  读取失败：" + err.Error()}
+			}
+			parts[i] = lines
+		})
+	}
+	wg.Wait()
+	var lines []string
+	for _, p := range parts {
+		lines = append(lines, p...)
+	}
+	m := message.Message{Icon: "📊", Title: "[" + b.host + "] 总览", Pre: strings.Join(lines, "\n")}
+	if n := len(b.alerts.Active()); n > 0 {
+		m.After = fmt.Sprintf("，%d 条告警中（发 a 查看）", n)
+	}
+	return m, nil
+}
+
+func safeSummary(s Summarizer, ctx context.Context) (lines []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("内部错误（%v）", r)
+		}
+	}()
+	return s.Summary(ctx)
 }
 
 // dispatch answers one chat line. Commands start with "!" or "/"; in the
 // bot's own Matrix room (needPrefix false) the bare word works too: "s",
 // "status". Telegram's "/status@SomeBot" form is accepted. Unknown commands
-// get the help text. ok is false when the line is not addressed to the bot.
-func (b *Bot) dispatch(ctx context.Context, req Request, text string, needPrefix bool) (reply message.Message, ok bool) {
+// get the help text, except in strict mode (a shared room), where they are
+// left alone. ok is false when the line is not addressed to the bot.
+func (b *Bot) dispatch(ctx context.Context, req Request, text string, needPrefix, strict bool) (reply message.Message, ok bool) {
 	if req.Received.IsZero() {
 		req.Received = time.Now()
 	}
@@ -41,6 +93,9 @@ func (b *Bot) dispatch(ctx context.Context, req Request, text string, needPrefix
 	}
 	cmd, found := b.byName[name]
 	if !found {
+		if strict {
+			return message.Message{}, false
+		}
 		cmd = b.byName["help"]
 	}
 	reply, err := b.safeRun(ctx, cmd, req)

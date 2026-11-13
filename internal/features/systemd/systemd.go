@@ -175,6 +175,10 @@ func orQ(s string) string {
 
 func (m *Module) cmdServices(ctx context.Context, _ bot.Request) (message.Message, error) {
 	var lines []string
+	nameW := 12
+	for _, u := range m.cfg.Units {
+		nameW = max(nameW, len(u))
+	}
 	for _, u := range m.cfg.Units {
 		p, err := m.sd.Show(ctx, u, "ActiveState", "MemoryCurrent")
 		if err != nil {
@@ -184,7 +188,7 @@ func (m *Module) cmdServices(ctx context.Context, _ bot.Request) (message.Messag
 		if v, err := strconv.ParseUint(p["MemoryCurrent"], 10, 64); err == nil && v != 1<<64-1 {
 			mem = human.Bytes(v)
 		}
-		lines = append(lines, strings.TrimRight(fmt.Sprintf("%-12s %-8s %s", u, orQ(p["ActiveState"]), mem), " "))
+		lines = append(lines, strings.TrimRight(fmt.Sprintf("%-*s %-8s %s", nameW, u, orQ(p["ActiveState"]), mem), " "))
 	}
 	for _, job := range m.jobs {
 		result, at, err := m.lastRun(ctx, job)
@@ -198,4 +202,45 @@ func (m *Module) cmdServices(ctx context.Context, _ bot.Request) (message.Messag
 		lines = append(lines, fmt.Sprintf("备份 %-8s %-8s %s", job, orQ(result), when))
 	}
 	return message.Message{Icon: "🧩", Title: "[" + m.env.Host + "] 服务", Pre: strings.Join(lines, "\n")}, nil
+}
+
+// Summary implements bot.Summarizer: units up, and each backup's last run.
+func (m *Module) Summary(ctx context.Context) ([]string, error) {
+	var lines []string
+	if len(m.cfg.Units) > 0 {
+		var down []string
+		for _, u := range m.cfg.Units {
+			p, err := m.sd.Show(ctx, u, "ActiveState")
+			if err != nil {
+				return nil, err
+			}
+			if st := p["ActiveState"]; st != "active" {
+				down = append(down, u+" "+orQ(st))
+			}
+		}
+		l := fmt.Sprintf("服务  %d/%d 正常", len(m.cfg.Units)-len(down), len(m.cfg.Units))
+		if len(down) > 0 {
+			l += "（" + strings.Join(down, "，") + "）"
+		}
+		lines = append(lines, l)
+	}
+	if len(m.jobs) > 0 {
+		var parts []string
+		for _, job := range m.jobs {
+			result, at, err := m.lastRun(ctx, job)
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case at.IsZero():
+				parts = append(parts, job+" 从未运行")
+			case result != "success":
+				parts = append(parts, job+" 失败（"+orQ(result)+"）")
+			default:
+				parts = append(parts, job+" "+human.Duration(time.Since(at))+"前")
+			}
+		}
+		lines = append(lines, "备份  "+strings.Join(parts, " · "))
+	}
+	return lines, nil
 }

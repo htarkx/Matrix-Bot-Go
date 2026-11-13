@@ -47,6 +47,56 @@ type rooms struct {
 	mu         sync.Mutex // the watch loop and the sync loop both resolve rooms
 	ids        map[role]string
 	lastInvite map[role]time.Time
+
+	cmdIDs  map[string]string    // command room alias -> room ID, once resolved and joined
+	cmdWarn map[string]time.Time // last warning per unresolved command room
+}
+
+// commandRooms returns the IDs of the configured command rooms the bot is
+// in. A room that cannot be resolved or that the bot has not joined is
+// skipped (with a warning at most hourly) and retried on the next call.
+func (r *rooms) commandRooms(ctx context.Context) []string {
+	var out []string
+	for _, a := range r.cfg.Commands {
+		r.mu.Lock()
+		id, ok := r.cmdIDs[a]
+		r.mu.Unlock()
+		if !ok {
+			var err error
+			if id, err = r.joinedCommandRoom(ctx, a); err != nil {
+				r.mu.Lock()
+				due := time.Since(r.cmdWarn[a]) > time.Hour
+				if due {
+					r.cmdWarn[a] = time.Now()
+				}
+				r.mu.Unlock()
+				if due {
+					r.log.Warn("command room unavailable", "alias", a, "err", err)
+				}
+				continue
+			}
+			r.mu.Lock()
+			r.cmdIDs[a] = id
+			r.mu.Unlock()
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (r *rooms) joinedCommandRoom(ctx context.Context, alias string) (string, error) {
+	id, err := r.me.ResolveAlias(ctx, r.mx.Alias(alias))
+	if err != nil {
+		return "", err
+	}
+	m, err := r.me.Membership(ctx, id, r.me.UserID)
+	if err != nil {
+		return "", err
+	}
+	if m != "join" {
+		return "", fmt.Errorf("bot membership is %q, not join", m)
+	}
+	return id, nil
 }
 
 func (r *rooms) roomConfig(ro role) config.RoomConfig {
@@ -223,17 +273,22 @@ func (r *rooms) send(ctx context.Context, ro role, msg message.Message, msgtype 
 // reply posts the answer to a command the admin just sent in that room.
 // Only joined members can send, so the command itself proves the admin is
 // there: no membership round trip before the reply.
-func (r *rooms) reply(ctx context.Context, ro role, msg message.Message) bool {
-	return r.post(ctx, ro, msg, "m.notice")
+func (r *rooms) reply(ctx context.Context, roomID string, msg message.Message) bool {
+	return r.postTo(ctx, roomID, msg, "m.notice")
 }
 
-// post sends msg, retrying network blips; true when the server took it.
+// post sends msg to a role's room; true when the server took it.
 func (r *rooms) post(ctx context.Context, ro role, msg message.Message, msgtype string) bool {
 	id, err := r.room(ctx, ro)
 	if err != nil {
 		return false
 	}
-	err = r.retry.do(ctx, "matrix send", func() error {
+	return r.postTo(ctx, id, msg, msgtype)
+}
+
+// postTo sends msg, retrying network blips; true when the server took it.
+func (r *rooms) postTo(ctx context.Context, id string, msg message.Message, msgtype string) bool {
+	err := r.retry.do(ctx, "matrix send", func() error {
 		_, err := r.me.Send(ctx, id, "m.room.message", map[string]string{
 			"msgtype":        msgtype,
 			"body":           msg.Plain(),
@@ -258,11 +313,11 @@ func (r *rooms) purge(ctx context.Context) error {
 	return err
 }
 
-// syncFilter limits /sync to message events in the query room.
-func syncFilter(roomID string) string {
+// syncFilter limits /sync to message events in the given rooms.
+func syncFilter(roomIDs []string) string {
 	b, _ := json.Marshal(map[string]any{
 		"room": map[string]any{
-			"rooms":         []string{roomID},
+			"rooms":         roomIDs,
 			"timeline":      map[string]any{"limit": 20, "types": []string{"m.room.message"}},
 			"state":         map[string]any{"lazy_load_members": true},
 			"ephemeral":     map[string]any{"not_types": []string{"*"}},

@@ -103,6 +103,12 @@ type Rooms struct {
 	Alerts RoomConfig `json:"alerts"`
 	// Query is where the admin types commands. Replies are m.notice.
 	Query RoomConfig `json:"query"`
+	// Commands are aliases (localparts) of other rooms where the admin's
+	// commands are answered too, e.g. the homeserver's admin room. The bot
+	// must already be a member; these rooms are never created. Only known
+	// commands get an answer there, so other talk (such as "!admin …" for
+	// the homeserver) is left alone.
+	Commands []string `json:"command_rooms"`
 }
 
 // RoomConfig describes one room.
@@ -265,6 +271,13 @@ func (c *Config) Validate() error {
 			}
 			if b.Rooms.Alerts.Alias == b.Rooms.Query.Alias {
 				add("%s: alerts and query rooms must differ", where)
+			}
+			for _, a := range b.Rooms.Commands {
+				if !localpartRe.MatchString(a) {
+					add("%s: command room alias %q is not a valid localpart", where, a)
+				} else if a == b.Rooms.Alerts.Alias || a == b.Rooms.Query.Alias {
+					add("%s: command room %q is already the alerts or query room", where, a)
+				}
 			}
 		}
 		if t := b.Telegram; t != nil {

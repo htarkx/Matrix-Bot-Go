@@ -154,6 +154,12 @@ func truncate(s string, n int) string {
 
 func esc(s string) string { return url.PathEscape(s) }
 
+// Get calls a read-only endpoint (e.g. the Synapse admin API, which Tuwunel
+// serves too) and decodes the JSON answer into out.
+func (i *Identity) Get(ctx context.Context, path string, query url.Values, out any) error {
+	return i.do(ctx, http.MethodGet, path, query, nil, out)
+}
+
 // Register creates the virtual user if it does not exist yet. The
 // appservice's own user exists implicitly and must not be registered.
 func (i *Identity) Register(ctx context.Context) error {

@@ -272,3 +272,16 @@ func TestConfigRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("empty config: %v", err)
 	}
 }
+
+func TestMonthLine(t *testing.T) {
+	m := &Module{cfg: Config{MonthlyQuotaGB: 1000}}
+	n := &netUsage{month: traffic{rx: 3e9, tx: 1e9}}
+	// 10 of 30 days of November gone: 4 GB so far -> 12 GB projected
+	got := m.monthLine(n, time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC))
+	if want := "本月 3.7G，预计 11.2G / 1000G（1%）"; got != want {
+		t.Errorf("monthLine = %q, want %q", got, want)
+	}
+	if got := m.monthLine(n, time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)); got != "本月 3.7G" {
+		t.Errorf("first day: %q", got)
+	}
+}

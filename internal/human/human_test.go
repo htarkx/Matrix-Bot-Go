@@ -39,3 +39,24 @@ func TestDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestPad(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"abc", 6, "abc   "},
+		{"5 分钟前", 10, "5 分钟前  "}, // 2 + 3×2 = 8 columns
+		{"🎤🖥", 6, "🎤🖥  "},
+		{"toolongvalue", 6, "toolongvalue"},
+	}
+	for _, c := range cases {
+		if got := Pad(c.in, c.width); got != c.want {
+			t.Errorf("Pad(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
+		}
+	}
+	if w := Width("1 小时 5 分前"); w != 13 {
+		t.Errorf("Width = %d, want 13", w)
+	}
+}

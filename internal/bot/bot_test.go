@@ -154,7 +154,7 @@ func TestDispatch(t *testing.T) {
 		{"a", false, "没有告警"},
 	}
 	for _, c := range cases {
-		reply, ok := b.dispatch(ctx, Request{Channel: "test"}, c.text, c.needPrefix)
+		reply, ok := b.dispatch(ctx, Request{Channel: "test"}, c.text, c.needPrefix, false)
 		if c.want == "" {
 			if ok {
 				t.Errorf("%q: answered %q", c.text, reply.Plain())
@@ -165,7 +165,7 @@ func TestDispatch(t *testing.T) {
 			t.Errorf("%q: got %q (ok=%v), want %q", c.text, reply.Plain(), ok, c.want)
 		}
 	}
-	help, _ := b.dispatch(ctx, Request{}, "h", false)
+	help, _ := b.dispatch(ctx, Request{}, "h", false, false)
 	if p := help.Plain(); !strings.Contains(p, "s — 状态（status）") || !strings.Contains(p, "boom — 出错（boom）") ||
 		!strings.Contains(p, "h/? — 指令列表（help）") {
 		t.Errorf("help = %q", p)

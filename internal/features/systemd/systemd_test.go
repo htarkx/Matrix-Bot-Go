@@ -107,3 +107,24 @@ func TestConfigValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestSummary(t *testing.T) {
+	sd := fakeSD{
+		"nginx":                     {"ActiveState": "active"},
+		"app":                       {"ActiveState": "failed"},
+		"edge-backup@db.service":    {"Result": "success", "ExecMainExitTimestamp": ago(12 * time.Minute)},
+		"edge-backup@media.service": {"Result": "exit-code", "ExecMainExitTimestamp": ago(time.Hour)},
+		"edge-backup@never.service": {"Result": "success", "ExecMainExitTimestamp": ""},
+	}
+	got, err := mod(t, sd).Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "服务  1/2 正常（app failed）\n备份  db 12 分钟前 · media 失败（exit-code） · never 从未运行"
+	if strings.Join(got, "\n") != want {
+		t.Errorf("summary\n%s\nwant\n%s", strings.Join(got, "\n"), want)
+	}
+	if _, err := mod(t, fakeSD(nil)).Summary(context.Background()); err == nil {
+		t.Error("unreachable systemd gave a summary")
+	}
+}

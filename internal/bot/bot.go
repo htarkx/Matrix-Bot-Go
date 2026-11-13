@@ -34,6 +34,8 @@ type Options struct {
 	// or received and no room is touched.
 	DryRun bool
 	Log    *slog.Logger
+	// Secret reads credential files for modules; nil means none available.
+	Secret func(name string) (string, error)
 }
 
 // Bot is one running bot.
@@ -47,11 +49,12 @@ type Bot struct {
 	rooms *rooms           // nil without Matrix
 	tg    *telegram.Client // nil without Telegram
 
-	alerts   *alert.Engine
-	checks   []Check
-	commands []Command          // in help order
-	byName   map[string]Command // names and aliases
-	jobs     []Job
+	alerts      *alert.Engine
+	checks      []Check
+	commands    []Command          // in help order
+	byName      map[string]Command // names and aliases
+	jobs        []Job
+	summarizers []namedSummarizer // dashboard sections, in module order
 
 	purgeMu  sync.Mutex
 	purgeErr error
@@ -88,10 +91,15 @@ func New(o Options) (*Bot, error) {
 			me: b.me, mx: o.MatrixCfg, cfg: c.Rooms, admin: c.Admin, botID: c.ID, host: o.Host,
 			log: log, retry: b.retry, invite: time.Hour,
 			ids: map[role]string{}, lastInvite: map[role]time.Time{},
+			cmdIDs: map[string]string{}, cmdWarn: map[string]time.Time{},
 		}
 	}
 	if c.Telegram != nil {
 		b.tg = o.Telegram
+	}
+	secret := o.Secret
+	if secret == nil {
+		secret = func(name string) (string, error) { return "", fmt.Errorf("no credential %q available", name) }
 	}
 
 	for _, m := range c.Modules {
@@ -100,9 +108,15 @@ func New(o Options) (*Bot, error) {
 			return nil, fmt.Errorf("bot %s: unknown module %q (have %v)", c.ID, m.Name,
 				slices.Sorted(maps.Keys(o.Factories)))
 		}
-		mod, err := f(Env{Host: o.Host, BotID: c.ID, Log: log.With("module", m.Name), Alerts: b.alerts}, m.Config)
+		mod, err := f(Env{
+			Host: o.Host, BotID: c.ID, Log: log.With("module", m.Name), Alerts: b.alerts,
+			Matrix: b.me, Secret: secret,
+		}, m.Config)
 		if err != nil {
 			return nil, fmt.Errorf("bot %s: module %s: %w", c.ID, m.Name, err)
+		}
+		if s, ok := mod.(Summarizer); ok {
+			b.summarizers = append(b.summarizers, namedSummarizer{m.Name, s})
 		}
 		b.checks = append(b.checks, mod.Checks()...)
 		for _, cmd := range mod.Commands() {
@@ -294,19 +308,30 @@ func (b *Bot) runJob(ctx context.Context, j Job) {
 	}
 }
 
-// pollMatrix answers the admin's messages in the query room.
+// pollMatrix answers the admin's messages in the query room and the
+// command rooms.
 func (b *Bot) pollMatrix(ctx context.Context) {
-	since := ""
+	since, filter := "", ""
 	for ctx.Err() == nil {
-		room, err := b.rooms.room(ctx, queryRoom)
+		query, err := b.rooms.room(ctx, queryRoom)
 		if err == nil {
+			// A filter change (a command room resolved late) restarts the
+			// sync: a since token belongs to the filter it was made with.
+			extra := b.rooms.commandRooms(ctx)
+			if f := syncFilter(append([]string{query}, extra...)); f != filter {
+				filter, since = f, ""
+			}
 			var res *matrix.SyncResponse
-			res, err = b.me.Sync(ctx, since, syncFilter(room), b.syncTimeout)
+			res, err = b.me.Sync(ctx, since, filter, b.syncTimeout)
 			if err == nil {
 				first := since == ""
 				since = res.NextBatch
 				if !first { // skip whatever was said before we started
-					b.handleMatrix(ctx, res.Rooms.Join[room].Timeline.Events, time.Now())
+					received := time.Now()
+					b.handleMatrix(ctx, query, res.Rooms.Join[query].Timeline.Events, received, false)
+					for _, id := range extra {
+						b.handleMatrix(ctx, id, res.Rooms.Join[id].Timeline.Events, received, true)
+					}
 				}
 				continue
 			}
@@ -319,7 +344,10 @@ func (b *Bot) pollMatrix(ctx context.Context) {
 	}
 }
 
-func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event, received time.Time) {
+// handleMatrix answers the admin's commands in one room. In a command room
+// (strict) only known commands are answered; everything else is someone
+// else's business, e.g. "!admin …" for the homeserver.
+func (b *Bot) handleMatrix(ctx context.Context, roomID string, events []matrix.Event, received time.Time, strict bool) {
 	for _, ev := range events {
 		if ev.Sender != b.cfg.Admin {
 			continue
@@ -335,11 +363,11 @@ func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event, received 
 		if ev.OriginServerTS > 0 {
 			req.Sent = time.UnixMilli(ev.OriginServerTS)
 		}
-		reply, ok := b.dispatch(ctx, req, content.Body, false)
+		reply, ok := b.dispatch(ctx, req, content.Body, false, strict)
 		if !ok {
 			continue
 		}
-		if !b.rooms.reply(ctx, queryRoom, reply) {
+		if !b.rooms.reply(ctx, roomID, reply) {
 			b.sendTelegram(ctx, reply.WithNote(fallbackNote))
 		}
 	}
@@ -381,7 +409,7 @@ func (b *Bot) pollTelegram(ctx context.Context) {
 				continue
 			}
 			req := Request{Channel: "telegram", Sender: strconv.FormatInt(m.Chat.ID, 10), Received: received}
-			if reply, ok := b.dispatch(ctx, req, m.Text, true); ok {
+			if reply, ok := b.dispatch(ctx, req, m.Text, true, false); ok {
 				b.sendTelegram(ctx, reply)
 			}
 		}
@@ -393,4 +421,20 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-time.After(d):
 	}
+}
+
+// Exec runs one command offline and returns its plain-text answer: the
+// modules' jobs run once first (except the query-room purge) so cached
+// readings exist. Nothing is sent anywhere; for operators and debugging.
+func (b *Bot) Exec(ctx context.Context, text string) (string, error) {
+	for _, j := range b.jobs {
+		if j.Name == "purge-query-room" {
+			continue
+		}
+		if err := j.Run(ctx); err != nil {
+			b.log.Warn("job failed", "job", j.Name, "err", err)
+		}
+	}
+	reply, _ := b.dispatch(ctx, Request{Channel: "exec"}, text, false, false)
+	return reply.Plain(), nil
 }

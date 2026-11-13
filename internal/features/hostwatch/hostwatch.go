@@ -30,7 +30,10 @@ type Config struct {
 	// Commands always answer from the last reading: vnstat itself only saves
 	// every 5 minutes, so a reading is a few minutes old at worst.
 	NetRefresh config.Duration `json:"net_refresh"`
-	Thresholds Thresholds      `json:"thresholds"`
+	// MonthlyQuotaGB is the provider's monthly traffic allowance (rx+tx,
+	// 1 GB = 10^9 bytes); 0 = none. Shown with a month-end projection.
+	MonthlyQuotaGB float64    `json:"monthly_quota_gb"`
+	Thresholds     Thresholds `json:"thresholds"`
 }
 
 // Thresholds of the alerts. Zero values take the defaults.
@@ -310,6 +313,49 @@ func latency(d time.Duration) string {
 
 func (t traffic) String() string { return "↓" + human.Bytes(t.rx) + " ↑" + human.Bytes(t.tx) }
 
+// monthLine is this calendar month's total, a linear projection to month
+// end and the quota, e.g. "本月 4.6G，预计 70.0G / 1000G（7%）".
+func (m *Module) monthLine(n *netUsage, now time.Time) string {
+	used := float64(n.month.rx + n.month.tx)
+	s := "本月 " + human.Bytes(used)
+	y, mo, _ := now.Date()
+	start := time.Date(y, mo, 1, 0, 0, 0, 0, now.Location())
+	elapsed, total := now.Sub(start), start.AddDate(0, 1, 0).Sub(start)
+	if elapsed < 24*time.Hour {
+		return s // too early in the month to project
+	}
+	proj := used * float64(total) / float64(elapsed)
+	s += "，预计 " + human.Bytes(proj)
+	if q := m.cfg.MonthlyQuotaGB; q > 0 {
+		s += fmt.Sprintf(" / %.0fG（%.0f%%）", q, 100*proj/(q*1e9))
+	}
+	return s
+}
+
+// Summary implements bot.Summarizer: one host line and one traffic line.
+func (m *Module) Summary(context.Context) ([]string, error) {
+	mem, err := m.proc.meminfo()
+	if err != nil {
+		return nil, err
+	}
+	cpu := "采样中"
+	if c, _, ok := m.cpuAvg(10 * time.Minute); ok {
+		cpu = fmt.Sprintf("%.0f%%", c)
+	}
+	host := fmt.Sprintf("主机  CPU %s · 可用内存 %s · swap %s", cpu,
+		human.Bytes(mem["MemAvailable"]), human.Bytes(mem["SwapTotal"]-mem["SwapFree"]))
+	for _, p := range m.cfg.Disks {
+		if du, err := m.disk(p); err == nil {
+			host += fmt.Sprintf(" · 磁盘 %s %.0f%%", p, du.pct())
+		}
+	}
+	lines := []string{host}
+	if n := m.net.Load(); n != nil {
+		lines = append(lines, "流量  "+m.monthLine(n, time.Now()))
+	}
+	return lines, nil
+}
+
 // coverage notes when vnstat has less history than the window shown.
 func coverage(n *netUsage, days int) string {
 	if time.Since(n.since) < time.Duration(days)*24*time.Hour {
@@ -370,6 +416,7 @@ func (m *Module) cmdNet(_ context.Context, _ bot.Request) (message.Message, erro
 		"过去 24 小时  " + n.h24.String(),
 		"过去 30 天    " + n.d30.String(),
 		"本月          " + n.month.String(),
+		"              " + m.monthLine(n, time.Now()),
 		"",
 		"最近每天：",
 	}

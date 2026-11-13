@@ -18,7 +18,11 @@ import (
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/bot"
 	"github.com/htarkx/Matrix-Bot-Go/internal/config"
+	"github.com/htarkx/Matrix-Bot-Go/internal/features/b2"
+	"github.com/htarkx/Matrix-Bot-Go/internal/features/certs"
+	"github.com/htarkx/Matrix-Bot-Go/internal/features/homeserver"
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/hostwatch"
+	"github.com/htarkx/Matrix-Bot-Go/internal/features/livekit"
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/systemd"
 	"github.com/htarkx/Matrix-Bot-Go/internal/matrix"
 	"github.com/htarkx/Matrix-Bot-Go/internal/telegram"
@@ -29,8 +33,12 @@ var version = "dev"
 
 // factories are the modules a config may name.
 var factories = map[string]bot.Factory{
-	"hostwatch": hostwatch.New,
-	"systemd":   systemd.New,
+	"hostwatch":  hostwatch.New,
+	"systemd":    systemd.New,
+	"homeserver": homeserver.New,
+	"b2":         b2.New,
+	"livekit":    livekit.New,
+	"certs":      certs.New,
 }
 
 func main() {
@@ -40,6 +48,7 @@ func main() {
 		dryRun      = flag.Bool("dry-run", false, "evaluate and log what would be sent; send and receive nothing")
 		checkOnly   = flag.Bool("check-config", false, "validate the configuration and exit")
 		showVersion = flag.Bool("version", false, "print the version and exit")
+		execCmd     = flag.String("exec", "", "run one command (e.g. \"d\") for the first bot, print the answer and exit; sends nothing")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -47,13 +56,13 @@ func main() {
 		return
 	}
 	log := newLogger()
-	if err := run(log, *configPath, *credentials, *dryRun, *checkOnly); err != nil {
+	if err := run(log, *configPath, *credentials, *dryRun, *checkOnly, *execCmd); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool) error {
+func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool, execCmd string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -91,7 +100,7 @@ func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool) e
 		}
 		b, err := bot.New(bot.Options{
 			Config: bc, Host: cfg.Host, Matrix: mx, MatrixCfg: cfg.Matrix, Telegram: tg,
-			Factories: factories, DryRun: dryRun, Log: log,
+			Factories: factories, DryRun: dryRun, Log: log, Secret: secret,
 		})
 		if err != nil {
 			return err
@@ -101,6 +110,11 @@ func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool) e
 	if checkOnly {
 		fmt.Printf("config ok: %d bot(s)\n", len(bots))
 		return nil
+	}
+	if execCmd != "" {
+		out, err := bots[0].Exec(context.Background(), execCmd)
+		fmt.Println(out)
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
