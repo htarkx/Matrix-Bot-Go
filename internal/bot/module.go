@@ -60,9 +60,15 @@ type Request struct {
 	Channel string   // "matrix" or "telegram"
 	Sender  string   // Matrix user ID or Telegram chat ID
 	Args    []string // words after the command name
-	// Received is when the bot picked the command up, before parsing it.
-	// Commands can report their own processing time against it.
+	// Received is when the bot got the command (its /sync or getUpdates
+	// call returned), before parsing it. Commands can report their own
+	// processing time against it.
 	Received time.Time
+	// Sent is when the homeserver received the command (Matrix
+	// origin_server_ts, millisecond precision); zero on Telegram. The bot
+	// runs next to the homeserver, so Received-Sent is the sync delivery
+	// latency on one clock.
+	Sent time.Time
 }
 
 // Job runs periodically.

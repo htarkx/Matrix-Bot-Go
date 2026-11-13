@@ -261,6 +261,8 @@ type Event struct {
 	Sender  string          `json:"sender"`
 	EventID string          `json:"event_id"`
 	Content json.RawMessage `json:"content"`
+	// OriginServerTS is when the homeserver received the event (ms).
+	OriginServerTS int64 `json:"origin_server_ts"`
 }
 
 // Sync long-polls /sync. since == "" is the initial sync (returns at once).

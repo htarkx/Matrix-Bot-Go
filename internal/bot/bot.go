@@ -306,7 +306,7 @@ func (b *Bot) pollMatrix(ctx context.Context) {
 				first := since == ""
 				since = res.NextBatch
 				if !first { // skip whatever was said before we started
-					b.handleMatrix(ctx, res.Rooms.Join[room].Timeline.Events)
+					b.handleMatrix(ctx, res.Rooms.Join[room].Timeline.Events, time.Now())
 				}
 				continue
 			}
@@ -319,7 +319,7 @@ func (b *Bot) pollMatrix(ctx context.Context) {
 	}
 }
 
-func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event) {
+func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event, received time.Time) {
 	for _, ev := range events {
 		if ev.Sender != b.cfg.Admin {
 			continue
@@ -331,7 +331,11 @@ func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event) {
 		if json.Unmarshal(ev.Content, &content) != nil || content.MsgType != "m.text" {
 			continue
 		}
-		reply, ok := b.dispatch(ctx, Request{Channel: "matrix", Sender: ev.Sender}, content.Body, false)
+		req := Request{Channel: "matrix", Sender: ev.Sender, Received: received}
+		if ev.OriginServerTS > 0 {
+			req.Sent = time.UnixMilli(ev.OriginServerTS)
+		}
+		reply, ok := b.dispatch(ctx, req, content.Body, false)
 		if !ok {
 			continue
 		}
@@ -360,6 +364,7 @@ func (b *Bot) pollTelegram(ctx context.Context) {
 	var offset int64
 	for ctx.Err() == nil {
 		ups, err := b.tg.GetUpdates(ctx, offset, 50*time.Second)
+		received := time.Now()
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -375,7 +380,7 @@ func (b *Bot) pollTelegram(ctx context.Context) {
 			if m == nil || m.Chat.ID != b.cfg.Telegram.ChatID || m.Date < started.Unix()-60 {
 				continue
 			}
-			req := Request{Channel: "telegram", Sender: strconv.FormatInt(m.Chat.ID, 10)}
+			req := Request{Channel: "telegram", Sender: strconv.FormatInt(m.Chat.ID, 10), Received: received}
 			if reply, ok := b.dispatch(ctx, req, m.Text, true); ok {
 				b.sendTelegram(ctx, reply)
 			}

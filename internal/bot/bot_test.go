@@ -115,6 +115,9 @@ func (m *fakeModule) Commands() []Command {
 			if r.Received.IsZero() {
 				return message.Message{}, errors.New("Received not set")
 			}
+			if r.Channel == "matrix" && !r.Sent.Equal(time.UnixMilli(1_700_000_000_123)) {
+				return message.Message{}, fmt.Errorf("Sent = %v", r.Sent)
+			}
 			return msg("status via " + r.Channel + " " + strings.Join(r.Args, ",")), nil
 		}},
 		{Name: "boom", Help: "出错", Run: func(context.Context, Request) (message.Message, error) {
@@ -271,7 +274,7 @@ func lastBody(evs []sentEvent, sub string) string {
 
 func syncBody(room, sender, text string) string {
 	return fmt.Sprintf(`{"next_batch":"s%d","rooms":{"join":{%q:{"timeline":{"events":[
-		{"type":"m.room.message","sender":%q,"event_id":"$x","content":{"msgtype":"m.text","body":%q}}]}}}}}`,
+		{"type":"m.room.message","sender":%q,"event_id":"$x","origin_server_ts":1700000000123,"content":{"msgtype":"m.text","body":%q}}]}}}}}`,
 		time.Now().UnixNano(), room, sender, text)
 }
 

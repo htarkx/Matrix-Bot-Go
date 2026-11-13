@@ -184,13 +184,13 @@ func TestStatusAndTop(t *testing.T) {
 	if err := m.Jobs()[0].Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	msg, err := m.cmdStatus(context.Background(), bot.Request{Received: time.Now().Add(-2 * time.Millisecond)})
+	msg, err := m.cmdStatus(context.Background(), bot.Request{Sent: time.Now().Add(-5 * time.Millisecond), Received: time.Now().Add(-2 * time.Millisecond)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"运行 1 天 2 小时", "负载  0.20 / 0.14 / 0.10", "CPU   1分钟 采样中", "可用 488.3M",
 		"PSI   CPU 1.2%，内存 2.5%", "磁盘  / 40%（剩 60.0G）", "24h ↓1.0M ↑2.0M", "30天 ↓3.0G ↑4.0G（统计自",
-		"ms（Go：收到指令→生成回复）"} {
+		"ms（Go：收到指令→生成回复）", "投递  3.0ms（Tuwunel 收到指令→bot 拿到"} {
 		if !strings.Contains(msg.Pre, want) {
 			t.Errorf("status lacks %q:\n%s", want, msg.Pre)
 		}

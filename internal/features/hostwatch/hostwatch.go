@@ -282,6 +282,12 @@ func (m *Module) cmdStatus(ctx context.Context, req bot.Request) (message.Messag
 	if n := len(m.env.Alerts.Active()); n > 0 {
 		msg.After = fmt.Sprintf("，%d 条告警中", n)
 	}
+	if !req.Sent.IsZero() && !req.Received.IsZero() {
+		// origin_server_ts has millisecond precision, so tiny values can
+		// come out negative.
+		d := max(req.Received.Sub(req.Sent), 0)
+		lines = append(lines, "投递  "+latency(d)+"（Tuwunel 收到指令→bot 拿到，ms 精度）")
+	}
 	// Last, so it covers everything above: parsing, /proc, formatting.
 	if !req.Received.IsZero() {
 		lines = append(lines, "处理  "+latency(time.Since(req.Received))+"（Go：收到指令→生成回复）")
