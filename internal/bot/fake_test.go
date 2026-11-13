@@ -24,15 +24,16 @@ type fakeHS struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	aliases map[string]string // #alias:server -> room
-	members map[string]string // room|user -> membership
-	power   map[string]map[string]any
-	created []map[string]any
-	sent    []sentEvent
-	invites []string
-	putPL   int
-	syncs   chan string // bodies for incremental /sync answers
-	nextID  int
+	aliases    map[string]string // #alias:server -> room
+	members    map[string]string // room|user -> membership
+	power      map[string]map[string]any
+	created    []map[string]any
+	sent       []sentEvent
+	invites    []string
+	putPL      int
+	memberGets int
+	syncs      chan string // bodies for incremental /sync answers
+	nextID     int
 }
 
 type sentEvent struct {
@@ -95,6 +96,7 @@ func (f *fakeHS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.power[id] = pl
 		ok(map[string]string{"room_id": id})
 	case r.Method == "GET" && seg[0] == "rooms" && seg[2] == "state" && seg[3] == "m.room.member":
+		f.memberGets++
 		if m, found := f.members[seg[1]+"|"+seg[4]]; found {
 			ok(map[string]string{"membership": m})
 		} else {

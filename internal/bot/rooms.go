@@ -217,6 +217,18 @@ func (r *rooms) send(ctx context.Context, ro role, msg message.Message, msgtype 
 		r.log.Warn("matrix membership check failed", "role", ro, "err", err)
 		return false
 	}
+	return r.post(ctx, ro, msg, msgtype) && joined
+}
+
+// reply posts the answer to a command the admin just sent in that room.
+// Only joined members can send, so the command itself proves the admin is
+// there: no membership round trip before the reply.
+func (r *rooms) reply(ctx context.Context, ro role, msg message.Message) bool {
+	return r.post(ctx, ro, msg, "m.notice")
+}
+
+// post sends msg, retrying network blips; true when the server took it.
+func (r *rooms) post(ctx context.Context, ro role, msg message.Message, msgtype string) bool {
 	id, err := r.room(ctx, ro)
 	if err != nil {
 		return false
@@ -230,7 +242,7 @@ func (r *rooms) send(ctx context.Context, ro role, msg message.Message, msgtype 
 		})
 		return err
 	})
-	return err == nil && joined
+	return err == nil
 }
 
 // purge deletes query-room history older than the retention.

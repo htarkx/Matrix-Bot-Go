@@ -234,6 +234,23 @@ func TestRunEndToEnd(t *testing.T) {
 	if ev := hs.sentTo(query)[0]; ev.Content["msgtype"] != "m.notice" {
 		t.Errorf("reply msgtype = %v", ev.Content["msgtype"])
 	}
+	// a reply needs no membership check: the admin's own command proves it
+	hs.mu.Lock()
+	gets := hs.memberGets
+	hs.mu.Unlock()
+	hs.syncs <- syncBody(query, "@admin:ex.org", "s")
+	waitFor(t, func() string {
+		if len(hs.sentTo(query)) == 2 {
+			return "two"
+		}
+		return ""
+	})
+	hs.mu.Lock()
+	after := hs.memberGets
+	hs.mu.Unlock()
+	if after != gets {
+		t.Errorf("reply did %d membership lookups, want 0", after-gets)
+	}
 
 	// the command menu is scoped to the configured chat; the default one is removed
 	tg.mu.Lock()

@@ -339,7 +339,7 @@ func (b *Bot) handleMatrix(ctx context.Context, events []matrix.Event, received 
 		if !ok {
 			continue
 		}
-		if !b.rooms.send(ctx, queryRoom, reply, "m.notice") {
+		if !b.rooms.reply(ctx, queryRoom, reply) {
 			b.sendTelegram(ctx, reply.WithNote(fallbackNote))
 		}
 	}
