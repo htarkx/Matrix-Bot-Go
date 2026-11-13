@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/bot"
@@ -22,10 +23,14 @@ import (
 
 // Config is the module's JSON configuration.
 type Config struct {
-	Proc         string     `json:"proc"`          // default /proc
-	Disks        []string   `json:"disks"`         // default ["/"]
-	NetInterface string     `json:"net_interface"` // vnstat interface; empty = no traffic lines
-	Thresholds   Thresholds `json:"thresholds"`
+	Proc         string   `json:"proc"`          // default /proc
+	Disks        []string `json:"disks"`         // default ["/"]
+	NetInterface string   `json:"net_interface"` // vnstat interface; empty = no traffic lines
+	// NetRefresh is how often vnstat is read in the background (default 1m).
+	// Commands always answer from the last reading: vnstat itself only saves
+	// every 5 minutes, so a reading is a few minutes old at worst.
+	NetRefresh config.Duration `json:"net_refresh"`
+	Thresholds Thresholds      `json:"thresholds"`
 }
 
 // Thresholds of the alerts. Zero values take the defaults.
@@ -60,12 +65,13 @@ func (t *Thresholds) applyDefaults() {
 
 // Module is the hostwatch module.
 type Module struct {
-	bot.NoJobs
 	cfg    Config
 	proc   procfs
 	env    bot.Env
 	vnstat func(ctx context.Context, iface string, now time.Time) *netUsage
 	disk   func(path string) (diskUsage, error)
+
+	net atomic.Pointer[netUsage] // last good vnstat reading; nil before the first
 
 	mu   sync.Mutex // the check samples while commands read
 	cpu  *window[cpuSample]
@@ -88,12 +94,34 @@ func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
 	if len(c.Disks) == 0 {
 		c.Disks = []string{"/"}
 	}
+	if c.NetRefresh.Duration == 0 {
+		c.NetRefresh.Duration = time.Minute
+	}
 	c.Thresholds.applyDefaults()
 	return &Module{
 		cfg: c, proc: procfs(c.Proc), env: env,
 		vnstat: readVnstat, disk: statDisk,
 		cpu: newWindow[cpuSample](time.Hour + 2*time.Minute), swap: newWindow[uint64](time.Hour + 2*time.Minute),
 	}, nil
+}
+
+// Jobs implements bot.Module: the background vnstat reader.
+func (m *Module) Jobs() []bot.Job {
+	if m.cfg.NetInterface == "" {
+		return nil
+	}
+	return []bot.Job{{Name: "vnstat", Every: m.cfg.NetRefresh.Duration, Run: m.refreshNet}}
+}
+
+// refreshNet stores a fresh vnstat reading. A failed read keeps the last
+// good one: stale traffic numbers beat none.
+func (m *Module) refreshNet(ctx context.Context) error {
+	n := m.vnstat(ctx, m.cfg.NetInterface, time.Now())
+	if n == nil {
+		return fmt.Errorf("no vnstat data for %s", m.cfg.NetInterface)
+	}
+	m.net.Store(n)
+	return nil
 }
 
 // Checks implements bot.Module.
@@ -244,7 +272,7 @@ func (m *Module) cmdStatus(ctx context.Context, req bot.Request) (message.Messag
 		}
 	}
 	if m.cfg.NetInterface != "" {
-		if n := m.vnstat(ctx, m.cfg.NetInterface, time.Now()); n != nil {
+		if n := m.net.Load(); n != nil {
 			lines = append(lines,
 				"网络  24h "+n.h24.String(),
 				"      30天 "+n.d30.String()+coverage(n, 30))
@@ -254,7 +282,7 @@ func (m *Module) cmdStatus(ctx context.Context, req bot.Request) (message.Messag
 	if n := len(m.env.Alerts.Active()); n > 0 {
 		msg.After = fmt.Sprintf("，%d 条告警中", n)
 	}
-	// Last, so it covers everything above: parsing, /proc, vnstat, formatting.
+	// Last, so it covers everything above: parsing, /proc, formatting.
 	if !req.Received.IsZero() {
 		lines = append(lines, "处理  "+latency(time.Since(req.Received))+"（Go：收到指令→生成回复）")
 	}
@@ -323,11 +351,11 @@ func (m *Module) cmdTop(ctx context.Context, _ bot.Request) (message.Message, er
 	return msg, nil
 }
 
-func (m *Module) cmdNet(ctx context.Context, _ bot.Request) (message.Message, error) {
+func (m *Module) cmdNet(_ context.Context, _ bot.Request) (message.Message, error) {
 	if m.cfg.NetInterface == "" {
 		return message.Message{Lines: []string{"[" + m.env.Host + "] 没有配置 net_interface"}}, nil
 	}
-	n := m.vnstat(ctx, m.cfg.NetInterface, time.Now())
+	n := m.net.Load()
 	if n == nil {
 		return message.Message{Lines: []string{fmt.Sprintf("[%s] 没有流量数据（vnstat 未安装或尚未记录 %s）",
 			m.env.Host, m.cfg.NetInterface)}}, nil

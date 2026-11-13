@@ -173,8 +173,16 @@ func TestMemoryAndDiskAlerts(t *testing.T) {
 
 func TestStatusAndTop(t *testing.T) {
 	m := newModule(t, "testdata/proc", `, "net_interface": "eth0"`)
+	calls := 0
 	m.vnstat = func(_ context.Context, iface string, now time.Time) *netUsage {
+		calls++
 		return &netUsage{iface: iface, since: now.Add(-5 * 24 * time.Hour), h24: traffic{1 << 20, 2 << 20}, d30: traffic{3 << 30, 4 << 30}}
+	}
+	if jobs := m.Jobs(); len(jobs) != 1 || jobs[0].Every != time.Minute {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	if err := m.Jobs()[0].Run(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	msg, err := m.cmdStatus(context.Background(), bot.Request{Received: time.Now().Add(-2 * time.Millisecond)})
 	if err != nil {
@@ -187,12 +195,33 @@ func TestStatusAndTop(t *testing.T) {
 			t.Errorf("status lacks %q:\n%s", want, msg.Pre)
 		}
 	}
+	if net, _ := m.cmdNet(context.Background(), bot.Request{}); !strings.Contains(net.Pre, "过去 24 小时  ↓1.0M ↑2.0M") {
+		t.Errorf("net:\n%s", net.Pre)
+	}
+	if calls != 1 {
+		t.Errorf("commands ran vnstat themselves: %d calls", calls)
+	}
+	// a failed read keeps the last good one
+	m.vnstat = func(context.Context, string, time.Time) *netUsage { return nil }
+	if err := m.refreshNet(context.Background()); err == nil || m.net.Load() == nil {
+		t.Errorf("failed refresh: err=%v, kept=%v", err, m.net.Load() != nil)
+	}
 	top, err := m.cmdTop(context.Background(), bot.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(top.Pre, "按内存\ntuwunel") || !strings.Contains(top.Pre, "my (odd) proc") {
 		t.Errorf("top:\n%s", top.Pre)
+	}
+}
+
+func TestNoInterfaceNoJob(t *testing.T) {
+	m := newModule(t, "testdata/proc", "")
+	if len(m.Jobs()) != 0 {
+		t.Fatal("vnstat job without net_interface")
+	}
+	if net, _ := m.cmdNet(context.Background(), bot.Request{}); !strings.Contains(net.Plain(), "没有配置 net_interface") {
+		t.Errorf("net = %q", net.Plain())
 	}
 }
 

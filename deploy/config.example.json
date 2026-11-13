@@ -21,6 +21,7 @@
         "hostwatch": {
           "disks": ["/"],
           "net_interface": "eth0",
+          "net_refresh": "1m",
           "thresholds": {
             "cpu_busy_pct": 85, "cpu_window": "10m",
             "swap_io_pages_per_s": 25, "swap_window": "5m",
