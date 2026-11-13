@@ -49,11 +49,18 @@ func TestClient(t *testing.T) {
 		t.Errorf("sendMessage form %v", f)
 	}
 
-	if err := c.SetMyCommands(ctx, []Command{{"status", "状态"}}); err != nil {
+	if err := c.SetMyCommands(ctx, []Command{{"status", "状态"}}, ChatScope(42)); err != nil {
 		t.Fatal(err)
 	}
-	if f := got[2].Get("commands"); f != `[{"command":"status","description":"状态"}]` {
-		t.Errorf("commands = %s", f)
+	if f := got[2]; f.Get("commands") != `[{"command":"status","description":"状态"}]` ||
+		f.Get("scope") != `{"chat_id":42,"type":"chat"}` {
+		t.Errorf("setMyCommands form = %v", f)
+	}
+	if err := c.DeleteMyCommands(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if paths[3] != "/bot123:abc/deleteMyCommands" || got[3].Has("scope") {
+		t.Errorf("deleteMyCommands %s %v", paths[3], got[3])
 	}
 }
 

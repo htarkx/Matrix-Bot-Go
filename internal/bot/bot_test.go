@@ -232,6 +232,14 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Errorf("reply msgtype = %v", ev.Content["msgtype"])
 	}
 
+	// the command menu is scoped to the configured chat; the default one is removed
+	tg.mu.Lock()
+	menu := strings.Join(tg.menu, " | ")
+	tg.mu.Unlock()
+	if menu != `setMyCommands {"chat_id":42,"type":"chat"} | deleteMyCommands ` {
+		t.Errorf("menu calls = %q", menu)
+	}
+
 	// Telegram commands from the configured chat only
 	now := time.Now().Unix()
 	tg.updates <- fmt.Sprintf(`{"ok":true,"result":[

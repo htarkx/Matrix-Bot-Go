@@ -162,6 +162,7 @@ func (f *fakeHS) setMember(room, user, m string) {
 type fakeTG struct {
 	mu      sync.Mutex
 	texts   []string
+	menu    []string // "method scope" of setMyCommands / deleteMyCommands
 	updates chan string
 }
 
@@ -184,6 +185,9 @@ func newFakeTG(t *testing.T) (*fakeTG, *httptest.Server) {
 				io.WriteString(w, `{"ok":true,"result":[]}`)
 			}
 		default:
+			f.mu.Lock()
+			f.menu = append(f.menu, r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]+" "+r.PostForm.Get("scope"))
+			f.mu.Unlock()
 			io.WriteString(w, `{"ok":true,"result":true}`)
 		}
 	}))

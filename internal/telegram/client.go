@@ -118,11 +118,44 @@ type Command struct {
 	Description string `json:"description"`
 }
 
-// SetMyCommands replaces the bot's command menu.
-func (c *Client) SetMyCommands(ctx context.Context, cmds []Command) error {
+// Scope selects who sees a command menu; nil is the default scope (every
+// user who opens the bot).
+type Scope map[string]any
+
+// ChatScope shows a menu in one chat only.
+func ChatScope(chatID int64) Scope { return Scope{"type": "chat", "chat_id": chatID} }
+
+func scopeParams(scope Scope) (url.Values, error) {
+	p := url.Values{}
+	if scope != nil {
+		b, err := json.Marshal(scope)
+		if err != nil {
+			return nil, err
+		}
+		p.Set("scope", string(b))
+	}
+	return p, nil
+}
+
+// SetMyCommands replaces the command menu for a scope.
+func (c *Client) SetMyCommands(ctx context.Context, cmds []Command, scope Scope) error {
+	p, err := scopeParams(scope)
+	if err != nil {
+		return err
+	}
 	b, err := json.Marshal(cmds)
 	if err != nil {
 		return err
 	}
-	return c.call(ctx, "setMyCommands", url.Values{"commands": {string(b)}}, 20*time.Second, nil)
+	p.Set("commands", string(b))
+	return c.call(ctx, "setMyCommands", p, 20*time.Second, nil)
+}
+
+// DeleteMyCommands removes the command menu of a scope.
+func (c *Client) DeleteMyCommands(ctx context.Context, scope Scope) error {
+	p, err := scopeParams(scope)
+	if err != nil {
+		return err
+	}
+	return c.call(ctx, "deleteMyCommands", p, 20*time.Second, nil)
 }

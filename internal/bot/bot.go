@@ -348,8 +348,13 @@ func (b *Bot) pollTelegram(ctx context.Context) {
 	for _, c := range b.commands {
 		cmds = append(cmds, telegram.Command{Command: c.Name, Description: c.Help})
 	}
-	if err := b.tg.SetMyCommands(ctx, cmds); err != nil {
+	// The menu is shown only in the configured chat: anyone can open a bot,
+	// and the default-scope menu would tell them what this one does.
+	if err := b.tg.SetMyCommands(ctx, cmds, telegram.ChatScope(b.cfg.Telegram.ChatID)); err != nil {
 		b.log.Warn("telegram setMyCommands failed", "err", err)
+	}
+	if err := b.tg.DeleteMyCommands(ctx, nil); err != nil {
+		b.log.Warn("telegram deleteMyCommands (default scope) failed", "err", err)
 	}
 	started := time.Now()
 	var offset int64
