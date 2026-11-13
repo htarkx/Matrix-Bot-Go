@@ -1,0 +1,38 @@
+{
+  "host": "edge-1",
+  "matrix": {
+    "homeserver": "http://127.0.0.1:8008",
+    "server_name": "example.org",
+    "sender_localpart": "watch"
+  },
+  "bots": [
+    {
+      "id": "watch",
+      "user": "watch",
+      "admin": "@admin:example.org",
+      "rooms": {
+        "alerts": {"alias": "watch-alerts", "name": "edge-1 告警"},
+        "query": {"alias": "watch", "name": "edge-1 查询", "retention": "12h"}
+      },
+      "telegram": {"chat_id": 123456789, "commands": true},
+      "alerts": {"interval": "30s", "sustain": "60s", "remind": "6h"},
+      "out_of_band": ["svc:tuwunel", "svc:nginx", "self:"],
+      "modules": {
+        "hostwatch": {
+          "disks": ["/"],
+          "net_interface": "eth0",
+          "thresholds": {
+            "cpu_busy_pct": 85, "cpu_window": "10m",
+            "swap_io_pages_per_s": 25, "swap_window": "5m",
+            "swap_used_pct": 50, "mem_available_pct": 10, "disk_used_pct": 85
+          }
+        },
+        "systemd": {
+          "units": ["tuwunel", "nginx"],
+          "backups": {"db": "2h"},
+          "backup_unit": "edge-backup@%s.service"
+        }
+      }
+    }
+  ]
+}

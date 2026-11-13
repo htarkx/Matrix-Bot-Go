@@ -1,0 +1,41 @@
+# Example unit. The bot calls `systemctl show` over D-Bus, so it needs a
+# static system user: Ubuntu's dbus-daemon rejects DynamicUser= UIDs.
+[Unit]
+Description=Matrix bots (host alerts and status)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=matrix-bot
+Group=matrix-bot
+ExecStart=/usr/local/bin/matrix-bot -config /etc/matrix-bot/config.json
+LoadCredential=matrix_token:/etc/matrix-bot/matrix_token
+LoadCredential=telegram_token:/etc/matrix-bot/telegram_token
+Restart=always
+RestartSec=10
+Environment=GOMEMLIMIT=24MiB
+MemoryMax=48M
+CPUWeight=20
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

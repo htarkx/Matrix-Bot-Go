@@ -1,0 +1,4 @@
+nr_free_pages 1000
+pswpin 500
+pswpout 500
+pgfault 9
