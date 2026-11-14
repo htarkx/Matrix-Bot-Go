@@ -189,15 +189,15 @@ func (m *Module) swapRate(d time.Duration) (float64, bool) {
 func (m *Module) evaluate() []bot.Finding {
 	th := m.cfg.Thresholds
 	var out []bot.Finding
-	bad := func(key, format string, a ...any) {
-		out = append(out, bot.Finding{Key: key, Msg: fmt.Sprintf(format, a...)})
+	bad := func(key, what, format string, a ...any) {
+		out = append(out, bot.Finding{Key: key, What: what, Msg: fmt.Sprintf(format, a...)})
 	}
 
 	if busy, steal, ok := m.cpuAvg(th.CPUWindow.Duration); ok && busy >= th.CPUBusyPct {
-		bad("cpu", "CPU 持续高负载：%d 分钟平均 %.0f%%（steal %.0f%%）", int(th.CPUWindow.Minutes()), busy, steal)
+		bad("cpu", "CPU", "持续高负载：%d 分钟平均 %.0f%%（steal %.0f%%）", int(th.CPUWindow.Minutes()), busy, steal)
 	}
 	if r, ok := m.swapRate(th.SwapWindow.Duration); ok && r >= th.SwapIOPagesPerS {
-		bad("swap_io", "正在频繁使用 swap：%d 分钟平均换入换出 %.0f 页/秒（约 %s/s）",
+		bad("swap_io", "swap", "换入换出频繁：%d 分钟平均 %.0f 页/秒（约 %s/s）",
 			int(th.SwapWindow.Minutes()), r, human.Bytes(r*4096))
 	}
 	if mem, err := m.proc.meminfo(); err != nil {
@@ -206,31 +206,31 @@ func (m *Module) evaluate() []bot.Finding {
 		if total := mem["SwapTotal"]; total > 0 {
 			used := total - mem["SwapFree"]
 			if 100*float64(used)/float64(total) >= th.SwapUsedPct {
-				bad("swap_used", "swap 用量 %s / %s", human.Bytes(used), human.Bytes(total))
+				bad("swap_used", "swap", "用量 %s / %s", human.Bytes(used), human.Bytes(total))
 			}
 		}
 		if total := mem["MemTotal"]; total > 0 {
 			pct := 100 * float64(mem["MemAvailable"]) / float64(total)
 			if pct <= th.MemAvailablePct {
-				bad("mem", "可用内存只剩 %s（%.0f%%）", human.Bytes(mem["MemAvailable"]), pct)
+				bad("mem", "内存", "可用只剩 %s（%.0f%%）", human.Bytes(mem["MemAvailable"]), pct)
 			}
 		}
 	}
 	for _, p := range m.cfg.Disks {
 		du, err := m.disk(p)
 		if err != nil {
-			bad("disk:"+p, "磁盘 %s 无法读取：%v", p, err)
+			bad("disk:"+p, "磁盘 "+p, "无法读取：%v", err)
 			continue
 		}
 		if du.pct() >= th.DiskUsedPct {
-			bad("disk:"+p, "磁盘 %s 已用 %.0f%%（剩 %s）", p, du.pct(), human.Bytes(du.free))
+			bad("disk:"+p, "磁盘 "+p, "已用 %.0f%%（剩 %s）", du.pct(), human.Bytes(du.free))
 		}
 	}
 	return out
 }
 
 func (m *Module) title(icon, what string) message.Message {
-	return message.Message{Icon: icon, Title: "[" + m.env.Host + "] " + what}
+	return message.Message{Icon: icon, Title: m.env.Host + " " + what}
 }
 
 func (m *Module) cmdStatus(ctx context.Context, req bot.Request) (message.Message, error) {
@@ -405,11 +405,11 @@ func (m *Module) cmdTop(ctx context.Context, _ bot.Request) (message.Message, er
 
 func (m *Module) cmdNet(_ context.Context, _ bot.Request) (message.Message, error) {
 	if m.cfg.NetInterface == "" {
-		return message.Message{Lines: []string{"[" + m.env.Host + "] 没有配置 net_interface"}}, nil
+		return message.Message{Lines: []string{m.env.Host + " 没有配置 net_interface"}}, nil
 	}
 	n := m.net.Load()
 	if n == nil {
-		return message.Message{Lines: []string{fmt.Sprintf("[%s] 没有流量数据（vnstat 未安装或尚未记录 %s）",
+		return message.Message{Lines: []string{fmt.Sprintf("%s 没有流量数据（vnstat 未安装或尚未记录 %s）",
 			m.env.Host, m.cfg.NetInterface)}}, nil
 	}
 	lines := []string{

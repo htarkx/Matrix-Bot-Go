@@ -229,7 +229,7 @@ func (m *Module) Checks() []bot.Check {
 		if q.Up.LossPct < m.lossAlert && q.Down.LossPct < m.lossAlert {
 			return nil
 		}
-		return []bot.Finding{{Key: "call:loss", Msg: "通话丢包偏高：" + q.line()}}
+		return []bot.Finding{{Key: "call:loss", What: "通话线路", Msg: "丢包偏高：" + q.line()}}
 	}}}
 }
 

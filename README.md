@@ -81,7 +81,15 @@ second, Telegram-only bot (no `matrix` section, `telegram.commands: false`
 so the main bot keeps `getUpdates`) on another machine with the `probe`
 module pointed at the first host's services, and let the first host probe
 the second. Probes run on every alert evaluation; `sustain` absorbs a single
-lost probe. HTTP probes do not follow redirects and verify TLS.
+lost probe. HTTP probes do not follow redirects and verify TLS. Each target
+names the `host` it runs on: that machine is the subject of its alerts.
+
+**Alert wording.** Messages lead with the machine that has the problem, then
+the thing and its state: `🔴 edge-1：服务 nginx 停了（inactive）`, and on
+recovery `🟢 edge-1：服务 nginx 恢复正常` with how long it lasted. A problem
+seen on another machine (probes) adds who noticed it. Modules fill
+`bot.Finding` with `What` (the thing), `Msg` (what is wrong) and, for other
+machines, `Subject`.
 
 **Command rooms.** `rooms.command_rooms` lists rooms (by alias) where the
 admin's commands are answered too, typically the homeserver's admin room,

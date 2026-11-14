@@ -93,7 +93,7 @@ func (m *Module) Checks() []bot.Check {
 		var out []bot.Finding
 		for _, r := range m.sorted() {
 			if msg := m.problem(r); msg != "" {
-				out = append(out, bot.Finding{Key: "cert:" + r.Host, Msg: msg})
+				out = append(out, bot.Finding{Key: "cert:" + r.Host, What: "证书 " + r.Host, Msg: msg})
 			}
 		}
 		return out
@@ -159,15 +159,15 @@ func (m *Module) sorted() []Result {
 
 func (m *Module) daysLeft(r Result) int { return int(r.NotAfter.Sub(m.now()).Hours() / 24) }
 
-// problem is the alert text for a result, "" when it is fine.
+// problem is what is wrong with a result, "" when it is fine.
 func (m *Module) problem(r Result) string {
 	switch {
 	case r.NotAfter.IsZero():
-		return fmt.Sprintf("证书 %s 读取失败：%v", r.Host, r.Err)
+		return fmt.Sprintf("读取失败：%v", r.Err)
 	case r.Err != nil:
-		return fmt.Sprintf("证书 %s 校验失败：%v", r.Host, r.Err)
+		return fmt.Sprintf("校验失败：%v", r.Err)
 	case m.daysLeft(r) < m.cfg.WarnDays:
-		return fmt.Sprintf("证书 %s 还剩 %d 天到期（续期没有生效？）", r.Host, m.daysLeft(r))
+		return fmt.Sprintf("还剩 %d 天到期（续期没有生效？）", m.daysLeft(r))
 	}
 	return ""
 }
@@ -181,7 +181,7 @@ func (m *Module) Summary(context.Context) ([]string, error) {
 	var bad []string
 	for _, r := range rs {
 		if p := m.problem(r); p != "" {
-			bad = append(bad, p)
+			bad = append(bad, r.Host+" "+p)
 		}
 	}
 	if len(bad) > 0 {
@@ -192,7 +192,7 @@ func (m *Module) Summary(context.Context) ([]string, error) {
 }
 
 func (m *Module) cmdCerts(context.Context, bot.Request) (message.Message, error) {
-	msg := message.Message{Icon: "🔐", Title: "[" + m.env.Host + "] 证书"}
+	msg := message.Message{Icon: "🔐", Title: m.env.Host + " 证书"}
 	rs := m.sorted()
 	if len(rs) == 0 {
 		msg.After = "：检查中"

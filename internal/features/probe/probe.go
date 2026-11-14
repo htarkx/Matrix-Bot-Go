@@ -31,6 +31,9 @@ type Config struct {
 
 // Target is one thing to reach. Exactly one of HTTP and TCP is set.
 type Target struct {
+	// Host is the machine the target runs on: the subject of its alerts
+	// ("backbone-fra：通话服务 无法访问"). Name is the service on it.
+	Host string `json:"host"`
 	Name string `json:"name"`
 	// HTTP is a URL fetched with GET (redirects are not followed, TLS is
 	// verified); the answer must have status Expect (default 200).
@@ -81,6 +84,8 @@ func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
 		switch {
 		case t.Name == "":
 			errs = append(errs, fmt.Errorf("targets[%d]: name is required", i))
+		case t.Host == "":
+			errs = append(errs, fmt.Errorf("target %q: host (the machine it runs on) is required", t.Name))
 		case seen[t.Name]:
 			errs = append(errs, fmt.Errorf("targets[%d]: duplicate name %q", i, t.Name))
 		case (t.HTTP == "") == (t.TCP == ""):
@@ -120,7 +125,8 @@ func (m *Module) Checks() []bot.Check {
 		var out []bot.Finding
 		for _, t := range m.cfg.Targets {
 			if r := m.result(t.Name); r.Err != nil {
-				out = append(out, bot.Finding{Key: "probe:" + t.Name, Msg: fmt.Sprintf("%s 无法访问：%v", t.Name, r.Err)})
+				out = append(out, bot.Finding{Key: "probe:" + t.Name, Subject: t.Host, What: t.Name,
+					Msg: fmt.Sprintf("无法访问（%v）", r.Err)})
 			}
 		}
 		return out
@@ -223,7 +229,7 @@ func (m *Module) Summary(context.Context) ([]string, error) {
 		var bad []string
 		for _, t := range m.cfg.Targets {
 			if r := m.result(t.Name); r.Err != nil {
-				bad = append(bad, t.Name)
+				bad = append(bad, t.Host+" "+t.Name)
 			}
 		}
 		l += "（" + strings.Join(bad, "，") + " 不可达）"
@@ -244,7 +250,7 @@ func (m *Module) cmdProbe(ctx context.Context, _ bot.Request) (message.Message, 
 		if t.HTTP != "" {
 			what = t.HTTP
 		}
-		rows = append(rows, t.Name+"  "+state, "  "+what)
+		rows = append(rows, t.Host+" "+t.Name+"  "+state, "  "+what)
 	}
-	return message.Message{Icon: "📡", Title: "[" + m.env.Host + "] 外部探测", Pre: strings.Join(rows, "\n")}, nil
+	return message.Message{Icon: "📡", Title: m.env.Host + " 外部探测", After: "（从这台机器看别的机器）", Pre: strings.Join(rows, "\n")}, nil
 }

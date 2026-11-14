@@ -11,6 +11,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,11 @@ type Bot struct {
 	purgeMu  sync.Mutex
 	purgeErr error
 
+	// seenMu guards seen: the last finding per key, which carries the
+	// subject and the affected thing the alert engine does not keep.
+	seenMu sync.Mutex
+	seen   map[string]Finding
+
 	// tunables, shortened by tests
 	retry       retrier
 	errorPause  time.Duration // after a failed poll
@@ -77,6 +83,7 @@ func New(o Options) (*Bot, error) {
 		log:         log,
 		dryRun:      o.DryRun,
 		byName:      map[string]Command{},
+		seen:        map[string]Finding{},
 		retry:       retrier{attempts: 3, pause: 5 * time.Second, log: log},
 		errorPause:  10 * time.Second,
 		syncTimeout: 30 * time.Second,
@@ -178,11 +185,26 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	b.notify(ctx, message.Message{
 		Icon:  "ℹ️",
-		After: fmt.Sprintf("[%s] %s 已启动（查询房间发 h 看指令，Telegram 发 /help）", b.host, b.cfg.ID),
+		After: b.host + " 的监控已启动" + b.commandHint(),
 	}, "")
 	b.watch(ctx)
 	wg.Wait()
 	return nil
+}
+
+// commandHint tells where this bot takes commands, "" when nowhere.
+func (b *Bot) commandHint() string {
+	var where []string
+	if b.rooms != nil {
+		where = append(where, "查询房间发 h 看指令")
+	}
+	if b.tg != nil && b.cfg.Telegram.Commands {
+		where = append(where, "Telegram 发 /help")
+	}
+	if len(where) == 0 {
+		return ""
+	}
+	return "（" + strings.Join(where, "，") + "）"
 }
 
 // watch evaluates the checks every interval until ctx ends.
@@ -216,8 +238,11 @@ func (b *Bot) evaluate(ctx context.Context) {
 			found := c.Run(ctx)
 			mu.Lock()
 			defer mu.Unlock()
+			b.seenMu.Lock()
+			defer b.seenMu.Unlock()
 			for _, f := range found {
 				bad[f.Key] = f.Msg
+				b.seen[f.Key] = f
 			}
 		})
 	}
@@ -228,18 +253,61 @@ func (b *Bot) evaluate(ctx context.Context) {
 	for _, ev := range b.alerts.Update(bad) {
 		b.notify(ctx, b.alertMessage(ev), ev.Key)
 	}
+	// Forget findings that are neither bad nor firing any more.
+	firing := map[string]bool{}
+	for _, a := range b.alerts.Active() {
+		firing[a.Key] = true
+	}
+	b.seenMu.Lock()
+	for k := range b.seen {
+		if _, ok := bad[k]; !ok && !firing[k] {
+			delete(b.seen, k)
+		}
+	}
+	b.seenMu.Unlock()
 }
 
+// describe splits an alert into its headline parts: subject ("backbone-fra"),
+// the affected thing and the observer note, from the last finding of key.
+func (b *Bot) describe(key string) (subject, what, observer string) {
+	b.seenMu.Lock()
+	f := b.seen[key]
+	b.seenMu.Unlock()
+	subject = f.Subject
+	if subject == "" {
+		subject = b.host
+	} else if subject != b.host {
+		observer = "由 " + b.host + " 从外部发现"
+	}
+	return subject, f.What, observer
+}
+
+// headline is "<subject>：<what> <msg>".
+func headline(subject, what, msg string) string {
+	return subject + "：" + strings.TrimSpace(what+" "+msg)
+}
+
+// alertMessage renders an alert event with its subject first:
+//
+//	🔴 backbone-fra：服务 nginx 停了（inactive）
+//	🟢 backbone-fra：服务 nginx 恢复正常 / 异常持续 2 分钟（当时：停了（inactive））
 func (b *Bot) alertMessage(ev alert.Event) message.Message {
-	tag := "[" + b.host + "] "
+	subject, what, observer := b.describe(ev.Key)
+	var m message.Message
 	switch ev.Kind {
 	case alert.Firing:
-		return message.Message{Icon: "🔴", Title: tag + "告警", Lines: []string{ev.Msg}}
+		m = message.Message{Icon: "🔴", Title: headline(subject, what, ev.Msg)}
 	case alert.Reminder:
-		return message.Message{Icon: "🔴", Title: tag + "仍未恢复", After: "（已 " + human.Duration(ev.Age) + "）", Lines: []string{ev.Msg}}
+		m = message.Message{Icon: "🔴", Title: headline(subject, what, ev.Msg),
+			Lines: []string{"仍未恢复，已持续 " + human.Duration(ev.Age)}}
 	default:
-		return message.Message{Icon: "🟢", Title: tag + "已恢复", After: "（持续 " + human.Duration(ev.Age) + "）", Lines: []string{ev.Msg}}
+		m = message.Message{Icon: "🟢", Title: headline(subject, what, "恢复正常"),
+			Lines: []string{"异常持续 " + human.Duration(ev.Age) + "（当时：" + ev.Msg + "）"}}
 	}
+	if observer != "" {
+		m.Lines = append(m.Lines, observer)
+	}
+	return m
 }
 
 // selfCheck raises problems of the bot itself.
@@ -247,7 +315,7 @@ func (b *Bot) selfCheck(context.Context) []Finding {
 	b.purgeMu.Lock()
 	defer b.purgeMu.Unlock()
 	if b.purgeErr != nil {
-		return []Finding{{"self:purge", "查询房间清理失败（历史会一直累积）：" + b.purgeErr.Error()}}
+		return []Finding{{Key: "self:purge", What: "查询房间清理", Msg: "失败（历史会一直累积）：" + b.purgeErr.Error()}}
 	}
 	return nil
 }

@@ -53,7 +53,7 @@ func (b *Bot) cmdDashboard(ctx context.Context, _ Request) (message.Message, err
 	for _, p := range parts {
 		lines = append(lines, p...)
 	}
-	m := message.Message{Icon: "📊", Title: "[" + b.host + "] 总览", Pre: strings.Join(lines, "\n")}
+	m := message.Message{Icon: "📊", Title: b.host + " 总览", Pre: strings.Join(lines, "\n")}
 	if n := len(b.alerts.Active()); n > 0 {
 		m.After = fmt.Sprintf("，%d 条告警中（发 a 查看）", n)
 	}
@@ -118,11 +118,16 @@ func (b *Bot) safeRun(ctx context.Context, cmd Command, req Request) (reply mess
 func (b *Bot) cmdAlerts(context.Context, Request) (message.Message, error) {
 	active := b.alerts.Active()
 	if len(active) == 0 {
-		return message.Message{Icon: "✅", After: "[" + b.host + "] 没有告警"}, nil
+		return message.Message{Icon: "✅", After: b.host + " 没有告警"}, nil
 	}
-	m := message.Message{Icon: "🔴", Title: "[" + b.host + "] 告警中"}
+	m := message.Message{Icon: "🔴", Title: b.host + " 告警中"}
 	for _, a := range active {
-		m.Lines = append(m.Lines, fmt.Sprintf("• %s（%s）", a.Msg, human.Duration(time.Since(a.Since))))
+		subject, what, observer := b.describe(a.Key)
+		line := fmt.Sprintf("• %s（已 %s）", headline(subject, what, a.Msg), human.Duration(time.Since(a.Since)))
+		if observer != "" {
+			line += "，" + observer
+		}
+		m.Lines = append(m.Lines, line)
 	}
 	return m, nil
 }

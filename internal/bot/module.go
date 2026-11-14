@@ -50,9 +50,19 @@ type AlertView interface {
 
 // Finding is a condition that is bad right now. Key identifies it across
 // evaluations; a prefix such as "svc:" lets out_of_band route it.
+//
+// Messages read "<Subject>：<What> <Msg>" while it fires and "<Subject>：
+// <What> 恢复正常" once it is gone, so What names the thing ("服务 nginx",
+// "磁盘 /") and Msg says what is wrong with it ("停了（inactive）").
 type Finding struct {
 	Key string
 	Msg string
+	// What is the affected thing; empty when Msg says it all.
+	What string
+	// Subject is the machine the problem is on; empty means this host. Set
+	// it when a module watches another machine (probes): the message then
+	// names that machine and says this host noticed it.
+	Subject string
 }
 
 // Check evaluates conditions; it runs every alert interval.

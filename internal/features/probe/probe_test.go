@@ -55,27 +55,30 @@ func TestProbes(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]any{
 		"timeout": "300ms",
 		"targets": []map[string]any{
-			{"name": "ok", "http": srv.URL + "/ok"},
-			{"name": "login", "http": srv.URL + "/auth", "expect": 401},
-			{"name": "wrong", "http": srv.URL + "/auth"},
-			{"name": "moved", "http": srv.URL + "/moved"},
-			{"name": "slow", "http": srv.URL + "/slow"},
-			{"name": "untrusted", "http": tls.URL + "/ok"},
-			{"name": "port", "tcp": open.Addr().String()},
-			{"name": "noport", "tcp": closedAddr},
+			{"host": "h", "name": "ok", "http": srv.URL + "/ok"},
+			{"host": "h", "name": "login", "http": srv.URL + "/auth", "expect": 401},
+			{"host": "h", "name": "wrong", "http": srv.URL + "/auth"},
+			{"host": "h", "name": "moved", "http": srv.URL + "/moved"},
+			{"host": "h", "name": "slow", "http": srv.URL + "/slow"},
+			{"host": "h", "name": "untrusted", "http": tls.URL + "/ok"},
+			{"host": "h", "name": "port", "tcp": open.Addr().String()},
+			{"host": "h", "name": "noport", "tcp": closedAddr},
 		},
 	})
 	m := newModule(t, string(cfg))
 	got := map[string]string{}
 	for _, f := range m.Checks()[0].Run(context.Background()) {
 		got[f.Key] = f.Msg
+		if f.Subject != "h" || f.What != strings.TrimPrefix(f.Key, "probe:") {
+			t.Errorf("%s: subject %q what %q", f.Key, f.Subject, f.What)
+		}
 	}
 	want := map[string]string{
-		"probe:wrong":     "wrong 无法访问：HTTP 401（应为 200）",
-		"probe:moved":     "moved 无法访问：HTTP 302（应为 200）",
-		"probe:slow":      "slow 无法访问：超时",
-		"probe:untrusted": "untrusted 无法访问：",
-		"probe:noport":    "noport 无法访问：",
+		"probe:wrong":     "无法访问（HTTP 401（应为 200））",
+		"probe:moved":     "无法访问（HTTP 302（应为 200））",
+		"probe:slow":      "无法访问（超时）",
+		"probe:untrusted": "无法访问（",
+		"probe:noport":    "无法访问（",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("findings:\n%v", got)
@@ -93,17 +96,17 @@ func TestProbes(t *testing.T) {
 	}
 
 	sum, _ := m.Summary(context.Background())
-	if want := "探测  3/8 可达（wrong，moved，slow，untrusted，noport 不可达）"; sum[0] != want {
+	if want := "探测  3/8 可达（h wrong，h moved，h slow，h untrusted，h noport 不可达）"; sum[0] != want {
 		t.Errorf("summary %q, want %q", sum[0], want)
 	}
 	msg, _ := m.cmdProbe(context.Background(), bot.Request{})
-	if !strings.Contains(msg.Pre, "ok  ✅") || !strings.Contains(msg.Pre, "slow  ❌ 超时") {
+	if !strings.Contains(msg.Pre, "h ok  ✅") || !strings.Contains(msg.Pre, "h slow  ❌ 超时") {
 		t.Errorf("probe command:\n%s", msg.Pre)
 	}
 }
 
 func TestSummaryBeforeFirstRound(t *testing.T) {
-	m := newModule(t, `{"targets":[{"name":"x","tcp":"127.0.0.1:1"}]}`)
+	m := newModule(t, `{"targets":[{"host":"h","name":"x","tcp":"127.0.0.1:1"}]}`)
 	if s, _ := m.Summary(context.Background()); s[0] != "探测  进行中" {
 		t.Errorf("summary %q", s)
 	}
@@ -111,15 +114,16 @@ func TestSummaryBeforeFirstRound(t *testing.T) {
 
 func TestConfig(t *testing.T) {
 	for cfg, want := range map[string]string{
-		`{}`:                                 "targets is required",
-		`{"targets":[{"http":"https://x"}]}`: "name is required",
-		`{"targets":[{"name":"a","http":"https://x","tcp":"x:1"}]}`:                     "exactly one",
-		`{"targets":[{"name":"a"}]}`:                                                    "exactly one",
-		`{"targets":[{"name":"a","http":"ftp://x"}]}`:                                   "http(s) URL",
-		`{"targets":[{"name":"a","tcp":"no-port"}]}`:                                    "missing port",
-		`{"targets":[{"name":"a","tcp":"x:1"},{"name":"a","tcp":"y:1"}]}`:               "duplicate",
-		`{"targets":[{"name":"a","tcp":"x:1"}],"bogus":1}`:                              "unknown field",
-		`{"targets":[{"name":"a","http":"https://x"},{"name":"b","http":"https://y"}]}`: "",
+		`{}`:                                     "targets is required",
+		`{"targets":[{"http":"https://x"}]}`:     "name is required",
+		`{"targets":[{"name":"a","tcp":"x:1"}]}`: "host (the machine",
+		`{"targets":[{"host":"h","name":"a","http":"https://x","tcp":"x:1"}]}`:                                "exactly one",
+		`{"targets":[{"host":"h","name":"a"}]}`:                                                               "exactly one",
+		`{"targets":[{"host":"h","name":"a","http":"ftp://x"}]}`:                                              "http(s) URL",
+		`{"targets":[{"host":"h","name":"a","tcp":"no-port"}]}`:                                               "missing port",
+		`{"targets":[{"host":"h","name":"a","tcp":"x:1"},{"host":"h","name":"a","tcp":"y:1"}]}`:               "duplicate",
+		`{"targets":[{"host":"h","name":"a","tcp":"x:1"}],"bogus":1}`:                                         "unknown field",
+		`{"targets":[{"host":"h","name":"a","http":"https://x"},{"host":"h","name":"b","http":"https://y"}]}`: "",
 	} {
 		_, err := New(bot.Env{}, json.RawMessage(cfg))
 		switch {

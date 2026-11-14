@@ -47,10 +47,10 @@ func TestCheck(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, f := range mod(t, sd).check(context.Background()) {
-		got[f.Key] = f.Msg
+		got[f.Key] = f.What + " " + f.Msg
 	}
 	want := map[string]string{
-		"svc:app":   "服务 app 状态 failed",
+		"svc:app":   "服务 app 停了（failed）",
 		"bak:db":    "备份 db 已 3 小时 0 分 没有运行",
 		"bak:media": "备份 media 上次运行失败（exit-code）",
 		"bak:never": "备份 never 还没有成功运行过",

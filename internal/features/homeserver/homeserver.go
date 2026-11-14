@@ -146,7 +146,7 @@ func (m *Module) cmdUsers(ctx context.Context, _ bot.Request) (message.Message, 
 		rows = append(rows, human.Pad(local, 12)+" "+human.Pad(seen, 16)+fmt.Sprintf("%3d 个 %7s", md.Count, human.Bytes(md.Bytes)))
 	}
 	return message.Message{
-		Icon: "👥", Title: "[" + m.env.Host + "] 用户", After: fmt.Sprintf("（%d 个）", len(users)),
+		Icon: "👥", Title: m.env.Host + " 用户", After: fmt.Sprintf("（%d 个）", len(users)),
 		Pre:  strings.Join(rows, "\n"),
 		Note: "* 服务器管理员 · 最后在线 · 上传媒体（homeserver 记账）",
 	}, nil
@@ -180,7 +180,7 @@ func (m *Module) cmdRooms(ctx context.Context, _ bot.Request) (message.Message, 
 		rows = append(rows, fmt.Sprintf("%s %2d 人  %s", lock, r.JoinedMembers, name))
 	}
 	msg := message.Message{
-		Icon: "🏠", Title: "[" + m.env.Host + "] 房间",
+		Icon: "🏠", Title: m.env.Host + " 房间",
 		After: fmt.Sprintf("（%d 个，有人 %d）", len(rooms), len(occupied)),
 		Pre:   strings.Join(rows, "\n"),
 	}

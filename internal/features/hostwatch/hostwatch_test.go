@@ -137,9 +137,9 @@ func TestCPUAndSwapAlerts(t *testing.T) {
 	if got := keys(fs); got != "cpu,swap_io" {
 		t.Fatalf("findings = %s", got)
 	}
-	if fs[0].Msg != "CPU 持续高负载：1 分钟平均 90%（steal 0%）" ||
-		fs[1].Msg != "正在频繁使用 swap：1 分钟平均换入换出 100 页/秒（约 400K/s）" {
-		t.Errorf("messages = %q / %q", fs[0].Msg, fs[1].Msg)
+	if text(fs[0]) != "CPU 持续高负载：1 分钟平均 90%（steal 0%）" ||
+		text(fs[1]) != "swap 换入换出频繁：1 分钟平均 100 页/秒（约 400K/s）" {
+		t.Errorf("messages = %q / %q", text(fs[0]), text(fs[1]))
 	}
 }
 
@@ -157,7 +157,7 @@ func TestMemoryAndDiskAlerts(t *testing.T) {
 	fs := m.evaluate()
 	want := map[string]string{
 		"swap_used":  "swap 用量 900K / 1000K",
-		"mem":        "可用内存只剩 48.8M（5%）",
+		"mem":        "内存 可用只剩 48.8M（5%）",
 		"disk:/":     "磁盘 / 无法读取",
 		"disk:/data": "磁盘 /data 已用 90%（剩 10B）",
 	}
@@ -165,11 +165,14 @@ func TestMemoryAndDiskAlerts(t *testing.T) {
 		t.Fatalf("findings = %+v", fs)
 	}
 	for _, f := range fs {
-		if !strings.HasPrefix(f.Msg, want[f.Key]) {
-			t.Errorf("%s: %q, want prefix %q", f.Key, f.Msg, want[f.Key])
+		if !strings.HasPrefix(text(f), want[f.Key]) {
+			t.Errorf("%s: %q, want prefix %q", f.Key, text(f), want[f.Key])
 		}
 	}
 }
+
+// text is what an alert says about the finding: "<What> <Msg>".
+func text(f bot.Finding) string { return strings.TrimSpace(f.What + " " + f.Msg) }
 
 func TestStatusAndTop(t *testing.T) {
 	m := newModule(t, "testdata/proc", `, "net_interface": "eth0"`)

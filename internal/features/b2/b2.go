@@ -291,7 +291,7 @@ func (m *Module) Summary(context.Context) ([]string, error) {
 }
 
 func (m *Module) cmdBuckets(context.Context, bot.Request) (message.Message, error) {
-	msg := message.Message{Icon: "🪣", Title: "[" + m.env.Host + "] B2 存储"}
+	msg := message.Message{Icon: "🪣", Title: m.env.Host + " B2 存储"}
 	s, why := m.state()
 	if s == nil {
 		msg.After = "：" + why

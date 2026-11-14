@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/htarkx/Matrix-Bot-Go/internal/alert"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,39 @@ func TestCommandRoomEndToEnd(t *testing.T) {
 	}
 	if n := len(hs.sentTo(query)); n != 0 {
 		t.Errorf("query room got %d replies", n)
+	}
+}
+
+// Alerts lead with the machine that has the problem; a problem seen on
+// another machine says who noticed it.
+func TestAlertWording(t *testing.T) {
+	_, hsSrv := newFakeHS(t)
+	_, tgSrv := newFakeTG(t)
+	b := testBot(t, hsSrv, tgSrv, nil, nil)
+	b.seen["probe:rtc"] = Finding{Key: "probe:rtc", Subject: "fra", What: "通话服务", Msg: "无法访问（HTTP 502）"}
+	b.seen["svc:nginx"] = Finding{Key: "svc:nginx", What: "服务 nginx", Msg: "停了（inactive）"}
+	b.seen["legacy"] = Finding{Key: "legacy", Msg: "something odd"}
+	cases := []struct {
+		ev   alert.Event
+		want string
+	}{
+		{alert.Event{Kind: alert.Firing, Key: "probe:rtc", Msg: "无法访问（HTTP 502）"},
+			"🔴 fra：通话服务 无法访问（HTTP 502）\n由 edge-1 从外部发现"},
+		{alert.Event{Kind: alert.Resolved, Key: "probe:rtc", Msg: "无法访问（HTTP 502）", Age: 2 * time.Minute},
+			"🟢 fra：通话服务 恢复正常\n异常持续 2 分钟（当时：无法访问（HTTP 502））\n由 edge-1 从外部发现"},
+		{alert.Event{Kind: alert.Firing, Key: "svc:nginx", Msg: "停了（inactive）"},
+			"🔴 edge-1：服务 nginx 停了（inactive）"},
+		{alert.Event{Kind: alert.Reminder, Key: "svc:nginx", Msg: "停了（inactive）", Age: 6 * time.Hour},
+			"🔴 edge-1：服务 nginx 停了（inactive）\n仍未恢复，已持续 6 小时 0 分"},
+		{alert.Event{Kind: alert.Resolved, Key: "legacy", Msg: "something odd", Age: time.Minute},
+			"🟢 edge-1：恢复正常\n异常持续 1 分钟（当时：something odd）"},
+	}
+	for _, c := range cases {
+		if got := b.alertMessage(c.ev).Plain(); got != c.want {
+			t.Errorf("%s %s:\n%s\nwant\n%s", c.ev.Kind, c.ev.Key, got, c.want)
+		}
+	}
+	if hint := b.commandHint(); hint != "（查询房间发 h 看指令，Telegram 发 /help）" {
+		t.Errorf("hint %q", hint)
 	}
 }

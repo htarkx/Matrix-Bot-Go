@@ -219,10 +219,16 @@ func TestRunEndToEnd(t *testing.T) {
 	hs.setMember(query, "@admin:ex.org", "join")
 
 	// a finding fires (sustain 1 tick), then resolves
-	mod.findings.Store([]Finding{{"disk:/", "磁盘 / 已用 91%"}})
-	waitFor(t, func() string { return lastBody(hs.sentTo(alerts), "告警") })
+	mod.findings.Store([]Finding{{Key: "disk:/", What: "磁盘 /", Msg: "已用 91%"}})
+	fired := waitFor(t, func() string { return lastBody(hs.sentTo(alerts), "磁盘 / 已用 91%") })
+	if !strings.HasPrefix(fired, "🔴 edge-1：磁盘 / 已用 91%") {
+		t.Errorf("firing message %q", fired)
+	}
 	mod.findings.Store([]Finding(nil))
-	waitFor(t, func() string { return lastBody(hs.sentTo(alerts), "已恢复") })
+	resolved := waitFor(t, func() string { return lastBody(hs.sentTo(alerts), "恢复正常") })
+	if !strings.HasPrefix(resolved, "🟢 edge-1：磁盘 / 恢复正常\n异常持续 ") || !strings.Contains(resolved, "（当时：已用 91%）") {
+		t.Errorf("resolved message %q", resolved)
+	}
 
 	// the admin's message is answered as m.notice; others are ignored
 	hs.syncs <- syncBody(query, "@mallory:ex.org", "s")

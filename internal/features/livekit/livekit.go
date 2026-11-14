@@ -329,7 +329,7 @@ func (m *Module) cmdCalls(ctx context.Context, _ bot.Request) (message.Message, 
 	if err != nil {
 		return message.Message{}, err
 	}
-	msg := message.Message{Icon: "📞", Title: "[" + m.env.Host + "] 通话"}
+	msg := message.Message{Icon: "📞", Title: m.env.Host + " 通话"}
 	if len(calls) == 0 {
 		msg.After = "：没有进行中的通话"
 		return msg, nil

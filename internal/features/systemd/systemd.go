@@ -133,12 +133,12 @@ func (m *Module) lastRun(ctx context.Context, job string) (result string, at tim
 
 func (m *Module) check(ctx context.Context) []bot.Finding {
 	var out []bot.Finding
-	bad := func(key, format string, a ...any) {
-		out = append(out, bot.Finding{Key: key, Msg: fmt.Sprintf(format, a...)})
+	bad := func(key, what, format string, a ...any) {
+		out = append(out, bot.Finding{Key: key, What: what, Msg: fmt.Sprintf(format, a...)})
 	}
 	unreachable := func(err error) []bot.Finding {
 		// One alert about the monitor itself, not a false "down" for every unit.
-		return []bot.Finding{{Key: "self:systemd", Msg: m.env.BotID + " 读不到 systemd 状态，服务和备份检查暂停：" + err.Error()}}
+		return []bot.Finding{{Key: "self:systemd", What: "监控读取 systemd", Msg: "失败，服务和备份检查暂停：" + err.Error()}}
 	}
 	for _, u := range m.cfg.Units {
 		p, err := m.sd.Show(ctx, u, "ActiveState")
@@ -146,7 +146,11 @@ func (m *Module) check(ctx context.Context) []bot.Finding {
 			return unreachable(err)
 		}
 		if st := p["ActiveState"]; st != "active" {
-			bad("svc:"+u, "服务 %s 状态 %s", u, orQ(st))
+			if st == "inactive" || st == "failed" {
+				bad("svc:"+u, "服务 "+u, "停了（%s）", st)
+			} else {
+				bad("svc:"+u, "服务 "+u, "状态异常（%s）", orQ(st))
+			}
 		}
 	}
 	for _, job := range m.jobs {
@@ -156,11 +160,11 @@ func (m *Module) check(ctx context.Context) []bot.Finding {
 		}
 		switch age := time.Since(at); {
 		case result != "success":
-			bad("bak:"+job, "备份 %s 上次运行失败（%s）", job, orQ(result))
+			bad("bak:"+job, "备份 "+job, "上次运行失败（%s）", orQ(result))
 		case at.IsZero():
-			bad("bak:"+job, "备份 %s 还没有成功运行过", job)
+			bad("bak:"+job, "备份 "+job, "还没有成功运行过")
 		case age > m.cfg.Backups[job].Duration:
-			bad("bak:"+job, "备份 %s 已 %s 没有运行", job, human.Duration(age))
+			bad("bak:"+job, "备份 "+job, "已 %s 没有运行", human.Duration(age))
 		}
 	}
 	return out
@@ -201,7 +205,7 @@ func (m *Module) cmdServices(ctx context.Context, _ bot.Request) (message.Messag
 		}
 		lines = append(lines, fmt.Sprintf("备份 %-8s %-8s %s", job, orQ(result), when))
 	}
-	return message.Message{Icon: "🧩", Title: "[" + m.env.Host + "] 服务", Pre: strings.Join(lines, "\n")}, nil
+	return message.Message{Icon: "🧩", Title: m.env.Host + " 服务", Pre: strings.Join(lines, "\n")}, nil
 }
 
 // Summary implements bot.Summarizer: units up, and each backup's last run.
