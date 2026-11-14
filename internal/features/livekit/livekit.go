@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/bot"
+	"github.com/htarkx/Matrix-Bot-Go/internal/config"
 	"github.com/htarkx/Matrix-Bot-Go/internal/human"
 	"github.com/htarkx/Matrix-Bot-Go/internal/message"
 	"github.com/htarkx/Matrix-Bot-Go/internal/synadmin"
@@ -32,17 +33,27 @@ type Config struct {
 	URL string `json:"url"`
 	// KeysCredential holds "APIkey: secret" (LiveKit's key file format).
 	KeysCredential string `json:"keys_credential"` // default "livekit_keys"
+	// MetricsURL is LiveKit's Prometheus endpoint, e.g.
+	// http://127.0.0.1:6789/metrics. Empty: no line quality, no loss alert.
+	MetricsURL string `json:"metrics_url"`
+	// MetricsEvery is the scrape interval (default 15s); MetricsWindow the
+	// span reported and alerted on (default 1m).
+	MetricsEvery  config.Duration `json:"metrics_every"`
+	MetricsWindow config.Duration `json:"metrics_window"`
+	// LossAlertPct alerts when mean audio loss in either direction over the
+	// window reaches it (default 5; 0 = no alert).
+	LossAlertPct *float64 `json:"loss_alert_pct"`
 }
 
 // Module is the livekit module.
 type Module struct {
-	bot.NoChecks
-	bot.NoJobs
-	cfg   Config
-	env   bot.Env
-	http  *http.Client
-	rooms synadmin.Getter // nil: Matrix room names unavailable
-	now   func() time.Time
+	cfg       Config
+	env       bot.Env
+	http      *http.Client
+	rooms     synadmin.Getter // nil: Matrix room names unavailable
+	now       func() time.Time
+	metrics   *metrics // nil without metrics_url
+	lossAlert float64
 }
 
 // New is the module factory.
@@ -60,9 +71,24 @@ func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
 	if c.KeysCredential == "" {
 		c.KeysCredential = "livekit_keys"
 	}
-	m := &Module{cfg: c, env: env, http: &http.Client{Timeout: 10 * time.Second}, now: time.Now}
+	if c.MetricsEvery.Duration == 0 {
+		c.MetricsEvery.Duration = 15 * time.Second
+	}
+	if c.MetricsWindow.Duration == 0 {
+		c.MetricsWindow.Duration = time.Minute
+	}
+	if c.MetricsWindow.Duration < 2*c.MetricsEvery.Duration {
+		return nil, errors.New("metrics_window must span at least two scrapes (metrics_every)")
+	}
+	m := &Module{cfg: c, env: env, http: &http.Client{Timeout: 10 * time.Second}, now: time.Now, lossAlert: 5}
+	if c.LossAlertPct != nil {
+		m.lossAlert = *c.LossAlertPct
+	}
 	if env.Matrix != nil {
 		m.rooms = env.Matrix
+	}
+	if c.MetricsURL != "" {
+		m.metrics = &metrics{url: c.MetricsURL, window: c.MetricsWindow.Duration, http: m.http}
 	}
 	return m, nil
 }
@@ -280,7 +306,22 @@ func (m *Module) Summary(ctx context.Context) ([]string, error) {
 	for _, c := range calls {
 		parts = append(parts, fmt.Sprintf("%s %d 人", c.Room, len(c.Participants)))
 	}
-	return []string{"通话  " + strings.Join(parts, " · ")}, nil
+	lines := []string{"通话  " + strings.Join(parts, " · ")}
+	if l := m.qualityLine(); l != "" {
+		lines = append(lines, "      "+l)
+	}
+	return lines, nil
+}
+
+// qualityLine is the recent audio line quality, "" when unknown.
+func (m *Module) qualityLine() string {
+	if m.metrics == nil {
+		return ""
+	}
+	if q, ok := m.metrics.quality(); ok {
+		return q.line()
+	}
+	return "线路统计中"
 }
 
 func (m *Module) cmdCalls(ctx context.Context, _ bot.Request) (message.Message, error) {
@@ -321,6 +362,12 @@ func (m *Module) cmdCalls(ctx context.Context, _ bot.Request) (message.Message, 
 			rows = append(rows, "  "+human.Pad(p.Who, 12)+" "+human.Pad(media, 6)+" "+since)
 		}
 	}
+	if l := m.qualityLine(); l != "" {
+		rows = append(rows, "", "线路  "+l)
+	}
 	msg.Pre = strings.Join(rows, "\n")
+	if m.metrics != nil {
+		msg.Note = "上行 = 各人到服务器，下行 = 服务器到各人；所有人合计，不分人"
+	}
 	return msg, nil
 }

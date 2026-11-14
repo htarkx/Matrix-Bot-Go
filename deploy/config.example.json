@@ -37,7 +37,7 @@
         },
         "homeserver": {"hide_users": ["watch"]},
         "b2": {"refresh": "1h"},
-        "livekit": {"url": "http://127.0.0.1:7880"},
+        "livekit": {"url": "http://127.0.0.1:7880", "metrics_url": "http://127.0.0.1:6789/metrics", "loss_alert_pct": 5},
         "certs": {"hosts": ["matrix.example.org", "rtc.example.org"], "connect": "127.0.0.1:443", "warn_days": 14}
       }
     }

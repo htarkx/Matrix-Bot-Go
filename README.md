@@ -19,7 +19,7 @@ server on it**, and talk about both.
 | `sv` | systemd | units and backup jobs |
 | `u` `r` | homeserver | users (last seen, uploads), rooms |
 | `b` | b2 | Backblaze B2 usage per bucket (all versions, as billed) |
-| `c` | livekit | calls in progress: Matrix room, who, which media |
+| `c` | livekit | calls in progress: Matrix room, who, which media, recent audio loss/jitter/RTT |
 | `tls` | certs | certificate expiry |
 | `a` `h` | (built in) | active alerts, help |
 
@@ -40,7 +40,7 @@ internal/features/hostwatch   /proc, vnstat; status / top / net
 internal/features/systemd     units and backup jobs; services
 internal/features/homeserver  accounts, rooms, uploads (needs a server-admin bot)
 internal/features/b2          B2 bucket usage, listed on a schedule
-internal/features/livekit     MatrixRTC calls on a LiveKit SFU
+internal/features/livekit     MatrixRTC calls on a LiveKit SFU; line quality from its Prometheus endpoint
 internal/features/certs       TLS certificate expiry
 ```
 
@@ -65,6 +65,14 @@ listing it in `cmd/matrix-bot/main.go`. A module that also implements
 `bot.Summarizer` gets a section in the `d` dashboard; summaries answer from
 cached readings where a reading costs money or time (B2 listings are billed,
 certificates are checked every few hours).
+
+**Call quality.** With `metrics_url` (LiveKit's `prometheus.port`, keep it
+on loopback) the livekit module scrapes every `metrics_every` (15s) and shows
+audio loss, jitter and RTT over the last `metrics_window` (1m), uplink
+(participants → SFU) and downlink (SFU → participants). LiveKit aggregates
+these over all participants, so they are not per person. Mean audio loss at
+or above `loss_alert_pct` (default 5, 0 = off) in either direction raises
+`call:loss`; nothing is measured, so nothing alerts, when nobody is calling.
 
 **Command rooms.** `rooms.command_rooms` lists rooms (by alias) where the
 admin's commands are answered too, typically the homeserver's admin room,
