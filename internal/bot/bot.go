@@ -424,8 +424,9 @@ func sleep(ctx context.Context, d time.Duration) {
 }
 
 // Exec runs one command offline and returns its plain-text answer: the
-// modules' jobs run once first (except the query-room purge) so cached
-// readings exist. Nothing is sent anywhere; for operators and debugging.
+// modules' jobs (except the query-room purge) and checks run once first so
+// cached readings exist; check findings are discarded, not alerted. Nothing
+// is sent anywhere; for operators and debugging.
 func (b *Bot) Exec(ctx context.Context, text string) (string, error) {
 	for _, j := range b.jobs {
 		if j.Name == "purge-query-room" {
@@ -433,6 +434,11 @@ func (b *Bot) Exec(ctx context.Context, text string) (string, error) {
 		}
 		if err := j.Run(ctx); err != nil {
 			b.log.Warn("job failed", "job", j.Name, "err", err)
+		}
+	}
+	for _, c := range b.checks {
+		for _, f := range c.Run(ctx) {
+			b.log.Info("exec: check finding (not alerted)", "check", c.Name, "key", f.Key, "msg", f.Msg)
 		}
 	}
 	reply, _ := b.dispatch(ctx, Request{Channel: "exec"}, text, false, false)

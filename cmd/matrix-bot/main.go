@@ -23,6 +23,7 @@ import (
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/homeserver"
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/hostwatch"
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/livekit"
+	"github.com/htarkx/Matrix-Bot-Go/internal/features/probe"
 	"github.com/htarkx/Matrix-Bot-Go/internal/features/systemd"
 	"github.com/htarkx/Matrix-Bot-Go/internal/matrix"
 	"github.com/htarkx/Matrix-Bot-Go/internal/telegram"
@@ -39,6 +40,7 @@ var factories = map[string]bot.Factory{
 	"b2":         b2.New,
 	"livekit":    livekit.New,
 	"certs":      certs.New,
+	"probe":      probe.New,
 }
 
 func main() {

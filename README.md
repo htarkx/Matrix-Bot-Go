@@ -21,6 +21,7 @@ server on it**, and talk about both.
 | `b` | b2 | Backblaze B2 usage per bucket (all versions, as billed) |
 | `c` | livekit | calls in progress: Matrix room, who, which media, recent audio loss/jitter/RTT |
 | `tls` | certs | certificate expiry |
+| `p` | probe | other machines from the outside: HTTP status, TCP port |
 | `a` `h` | (built in) | active alerts, help |
 
 User-facing messages are in Chinese.
@@ -42,6 +43,7 @@ internal/features/homeserver  accounts, rooms, uploads (needs a server-admin bot
 internal/features/b2          B2 bucket usage, listed on a schedule
 internal/features/livekit     MatrixRTC calls on a LiveKit SFU; line quality from its Prometheus endpoint
 internal/features/certs       TLS certificate expiry
+internal/features/probe       outside probes (HTTP status, TCP connect) of other hosts
 ```
 
 Everything is under `internal/`: none of it is a public Go API. Features are
@@ -73,6 +75,13 @@ audio loss, jitter and RTT over the last `metrics_window` (1m), uplink
 these over all participants, so they are not per person. Mean audio loss at
 or above `loss_alert_pct` (default 5, 0 = off) in either direction raises
 `call:loss`; nothing is measured, so nothing alerts, when nobody is calling.
+
+**Watching each other.** A bot cannot report its own host going down. Run a
+second, Telegram-only bot (no `matrix` section, `telegram.commands: false`
+so the main bot keeps `getUpdates`) on another machine with the `probe`
+module pointed at the first host's services, and let the first host probe
+the second. Probes run on every alert evaluation; `sustain` absorbs a single
+lost probe. HTTP probes do not follow redirects and verify TLS.
 
 **Command rooms.** `rooms.command_rooms` lists rooms (by alias) where the
 admin's commands are answered too, typically the homeserver's admin room,
