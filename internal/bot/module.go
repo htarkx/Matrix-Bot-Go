@@ -33,6 +33,22 @@ type Env struct {
 	// Secret reads a credential file by name (systemd LoadCredential). It
 	// returns "" without error in dry-run and check-config mode.
 	Secret func(name string) (string, error)
+	// StateDir is a writable directory that survives restarts (systemd
+	// StateDirectory=); "" when there is none: keep state in memory only.
+	StateDir string
+	// Interval is how often checks run (the bot's alerts.interval).
+	Interval time.Duration
+	// Post sends an informational message (a report, not an alert): to the
+	// alerts room without a push notification, or Telegram when Matrix
+	// cannot deliver it or the bot has no Matrix. Dry runs only log it.
+	Post func(ctx context.Context, msg message.Message) error
+}
+
+// Stopper is optionally implemented by a module that must do something on
+// shutdown, e.g. write its state. The bot calls Stop once, after its loops
+// ended, with a short deadline.
+type Stopper interface {
+	Stop(ctx context.Context)
 }
 
 // Summarizer is optionally implemented by a module that has something to
@@ -101,6 +117,9 @@ type Job struct {
 	Every time.Duration
 	Delay time.Duration // before the first run
 	Run   func(ctx context.Context) error
+	// SideEffects marks a job that writes state or sends messages; -exec
+	// skips it (it only runs jobs that fill caches).
+	SideEffects bool
 }
 
 // NoChecks, NoCommands and NoJobs are embeddable empty implementations.

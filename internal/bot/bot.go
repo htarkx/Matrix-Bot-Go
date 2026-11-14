@@ -6,6 +6,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -37,6 +38,8 @@ type Options struct {
 	Log    *slog.Logger
 	// Secret reads credential files for modules; nil means none available.
 	Secret func(name string) (string, error)
+	// StateDir is passed to modules as Env.StateDir (may be "").
+	StateDir string
 }
 
 // Bot is one running bot.
@@ -56,6 +59,7 @@ type Bot struct {
 	byName      map[string]Command // names and aliases
 	jobs        []Job
 	summarizers []namedSummarizer // dashboard sections, in module order
+	stoppers    []Stopper
 
 	purgeMu  sync.Mutex
 	purgeErr error
@@ -117,13 +121,17 @@ func New(o Options) (*Bot, error) {
 		}
 		mod, err := f(Env{
 			Host: o.Host, BotID: c.ID, Log: log.With("module", m.Name), Alerts: b.alerts,
-			Matrix: b.me, Secret: secret,
+			Matrix: b.me, Secret: secret, StateDir: o.StateDir, Interval: c.Alerts.Interval.Duration,
+			Post: b.post,
 		}, m.Config)
 		if err != nil {
 			return nil, fmt.Errorf("bot %s: module %s: %w", c.ID, m.Name, err)
 		}
 		if s, ok := mod.(Summarizer); ok {
 			b.summarizers = append(b.summarizers, namedSummarizer{m.Name, s})
+		}
+		if s, ok := mod.(Stopper); ok {
+			b.stoppers = append(b.stoppers, s)
 		}
 		b.checks = append(b.checks, mod.Checks()...)
 		for _, cmd := range mod.Commands() {
@@ -142,7 +150,7 @@ func New(o Options) (*Bot, error) {
 	if b.rooms != nil && c.Rooms.Query.Retention.Duration > 0 {
 		b.jobs = append(b.jobs, Job{
 			Name: "purge-query-room", Every: c.Rooms.Query.PurgeEvery.Duration, Delay: time.Minute,
-			Run: b.purge,
+			Run: b.purge, SideEffects: true,
 		})
 	}
 	return b, nil
@@ -178,7 +186,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		}
 	}
 	for _, j := range b.jobs {
-		if b.dryRun && j.Name == "purge-query-room" {
+		if b.dryRun && j.SideEffects { // a dry run neither sends nor writes
 			continue
 		}
 		wg.Go(func() { b.runJob(ctx, j) })
@@ -189,7 +197,36 @@ func (b *Bot) Run(ctx context.Context) error {
 	}, "")
 	b.watch(ctx)
 	wg.Wait()
+	b.stop()
 	return nil
+}
+
+// stop lets modules finish (write state) after the loops ended.
+func (b *Bot) stop() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, s := range b.stoppers {
+		s.Stop(ctx)
+	}
+}
+
+// post sends an informational message: Matrix alerts room as m.notice (no
+// push), Telegram when Matrix did not deliver it or there is no Matrix.
+func (b *Bot) post(ctx context.Context, msg message.Message) error {
+	if b.dryRun {
+		b.log.Info("dry-run: would post", "text", msg.Plain())
+		return nil
+	}
+	if b.rooms != nil && b.rooms.send(ctx, alertsRoom, msg, "m.notice") {
+		return nil
+	}
+	if b.rooms != nil {
+		msg = msg.WithNote(fallbackNote)
+	}
+	if b.sendTelegram(ctx, msg) {
+		return nil
+	}
+	return errors.New("neither Matrix nor Telegram delivered the message")
 }
 
 // commandHint tells where this bot takes commands, "" when nowhere.
@@ -492,12 +529,15 @@ func sleep(ctx context.Context, d time.Duration) {
 }
 
 // Exec runs one command offline and returns its plain-text answer: the
-// modules' jobs (except the query-room purge) and checks run once first so
-// cached readings exist; check findings are discarded, not alerted. Nothing
-// is sent anywhere; for operators and debugging.
+// modules' cache-filling jobs and checks run once first so readings exist;
+// jobs with side effects (writing state, sending reports, purging) are
+// skipped and check findings are discarded, not alerted. Anything a module
+// would post is only logged. For operators and debugging, also next to the
+// running service.
 func (b *Bot) Exec(ctx context.Context, text string) (string, error) {
+	b.dryRun = true
 	for _, j := range b.jobs {
-		if j.Name == "purge-query-room" {
+		if j.SideEffects {
 			continue
 		}
 		if err := j.Run(ctx); err != nil {

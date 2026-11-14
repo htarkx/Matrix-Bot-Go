@@ -1,7 +1,13 @@
-// Package probe checks other machines from the outside: an HTTP(S) URL must
-// answer with an expected status, a TCP port must accept a connection. Run
-// on a second host it is the watcher of the first: when the host that runs
-// the main bot goes down, this one still alerts (over Telegram, typically).
+// Package probe watches other machines from the outside and keeps their
+// availability: an HTTP(S) URL must answer with an expected status, a TCP
+// port must accept a connection. Every check round is recorded, so the
+// module can tell "how many nines" over a day, a week, a month, and send
+// weekly and monthly reports against a target (SLO).
+//
+// Run on a second host it is the watcher of the first: when the host that
+// runs the main bot goes down, this one still alerts. Control targets (well
+// known outside services) tell this machine losing its own connection apart
+// from the targets going down: such rounds are neither recorded nor alerted.
 package probe
 
 import (
@@ -13,6 +19,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +34,20 @@ import (
 // Config is the module's JSON configuration.
 type Config struct {
 	Targets []Target `json:"targets"`
+	// Controls are well-known outside services (host is not needed). When
+	// every control fails as well, this machine is offline, not the targets.
+	Controls []Target `json:"controls"`
 	// Timeout per probe (default 10s).
 	Timeout config.Duration `json:"timeout"`
+	// SLOPct is the availability target in percent (default 99.9).
+	SLOPct float64 `json:"slo_pct"`
+	// Timezone of report periods and times (default UTC), e.g. Europe/Zurich.
+	Timezone string `json:"timezone"`
+	// WeeklyReport covers Monday to Monday, MonthlyReport the calendar month;
+	// both are sent at ReportHour (default 9) local time after the period.
+	WeeklyReport  bool `json:"weekly_report"`
+	MonthlyReport bool `json:"monthly_report"`
+	ReportHour    *int `json:"report_hour"`
 }
 
 // Target is one thing to reach. Exactly one of HTTP and TCP is set.
@@ -43,7 +64,7 @@ type Target struct {
 	TCP string `json:"tcp"`
 }
 
-// Result is a target's last probe.
+// Result is a probe's outcome.
 type Result struct {
 	At      time.Time
 	Err     error
@@ -52,19 +73,30 @@ type Result struct {
 
 // Module is the probe module.
 type Module struct {
-	bot.NoJobs
-	cfg  Config
-	env  bot.Env
-	http *http.Client
-	dial func(ctx context.Context, network, addr string) (net.Conn, error)
-	now  func() time.Time
+	cfg        Config
+	env        bot.Env
+	loc        *time.Location
+	reportHour int
+	interval   time.Duration
+	path       string // state file, "" = memory only
+	http       *http.Client
+	dial       func(ctx context.Context, network, addr string) (net.Conn, error)
+	now        func() time.Time
 
-	mu   sync.Mutex
-	last map[string]Result
+	mu      sync.Mutex
+	last    map[string]Result // targets, last recorded round
+	held    []bot.Finding     // findings of the last recorded round
+	offline bool              // last round: every control failed
+	st      *state
+	dirty   bool
 }
 
 // New is the module factory.
 func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
+	return newWithClock(env, raw, time.Now)
+}
+
+func newWithClock(env bot.Env, raw json.RawMessage, now func() time.Time) (*Module, error) {
 	var c Config
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -77,24 +109,44 @@ func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
 	if c.Timeout.Duration == 0 {
 		c.Timeout.Duration = 10 * time.Second
 	}
+	if c.SLOPct == 0 {
+		c.SLOPct = 99.9
+	}
+	if c.SLOPct <= 0 || c.SLOPct >= 100 {
+		return nil, fmt.Errorf("slo_pct %v must be between 0 and 100", c.SLOPct)
+	}
+	loc := time.UTC
+	if c.Timezone != "" {
+		l, err := time.LoadLocation(c.Timezone)
+		if err != nil {
+			return nil, fmt.Errorf("timezone: %w", err)
+		}
+		loc = l
+	}
+	hour := 9
+	if c.ReportHour != nil {
+		hour = *c.ReportHour
+	}
+	if hour < 0 || hour > 23 {
+		return nil, fmt.Errorf("report_hour %d is not an hour", hour)
+	}
 	seen := map[string]bool{}
 	var errs []error
-	for i := range c.Targets {
-		t := &c.Targets[i]
+	check := func(what string, i int, t *Target, needHost bool) {
 		switch {
 		case t.Name == "":
-			errs = append(errs, fmt.Errorf("targets[%d]: name is required", i))
-		case t.Host == "":
+			errs = append(errs, fmt.Errorf("%s[%d]: name is required", what, i))
+		case needHost && t.Host == "":
 			errs = append(errs, fmt.Errorf("target %q: host (the machine it runs on) is required", t.Name))
 		case seen[t.Name]:
-			errs = append(errs, fmt.Errorf("targets[%d]: duplicate name %q", i, t.Name))
+			errs = append(errs, fmt.Errorf("%s[%d]: duplicate name %q", what, i, t.Name))
 		case (t.HTTP == "") == (t.TCP == ""):
-			errs = append(errs, fmt.Errorf("target %q: set exactly one of http and tcp", t.Name))
+			errs = append(errs, fmt.Errorf("%s %q: set exactly one of http and tcp", what, t.Name))
 		case t.HTTP != "" && !strings.HasPrefix(t.HTTP, "http://") && !strings.HasPrefix(t.HTTP, "https://"):
-			errs = append(errs, fmt.Errorf("target %q: http must be an http(s) URL", t.Name))
+			errs = append(errs, fmt.Errorf("%s %q: http must be an http(s) URL", what, t.Name))
 		case t.TCP != "":
 			if _, _, err := net.SplitHostPort(t.TCP); err != nil {
-				errs = append(errs, fmt.Errorf("target %q: tcp: %w", t.Name, err))
+				errs = append(errs, fmt.Errorf("%s %q: tcp: %w", what, t.Name, err))
 			}
 		}
 		seen[t.Name] = true
@@ -102,62 +154,176 @@ func New(env bot.Env, raw json.RawMessage) (bot.Module, error) {
 			t.Expect = http.StatusOK
 		}
 	}
+	for i := range c.Targets {
+		check("targets", i, &c.Targets[i], true)
+	}
+	for i := range c.Controls {
+		check("controls", i, &c.Controls[i], false)
+	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	d := &net.Dialer{}
-	return &Module{
-		cfg: c, env: env, dial: d.DialContext, now: time.Now, last: map[string]Result{},
+
+	m := &Module{
+		cfg: c, env: env, loc: loc, reportHour: hour, interval: env.Interval,
+		now: now, last: map[string]Result{},
 		http: &http.Client{
 			// The status of the first answer is the check: a 302 to a login
 			// page means something else than a 200.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			Transport:     &http.Transport{DisableKeepAlives: true, Proxy: nil},
 		},
-	}, nil
+	}
+	if m.interval <= 0 {
+		m.interval = 30 * time.Second
+	}
+	m.dial = (&net.Dialer{}).DialContext
+	if env.StateDir != "" {
+		m.path = filepath.Join(env.StateDir, "probe.json")
+	}
+	m.st = m.loadState()
+	return m, nil
 }
 
-// Checks implements bot.Module: probes every target at once on every
-// evaluation; the alert engine's sustain absorbs a single lost probe.
-func (m *Module) Checks() []bot.Check {
-	return []bot.Check{{Name: "probe", Run: func(ctx context.Context) []bot.Finding {
-		m.runAll(ctx)
-		var out []bot.Finding
-		for _, t := range m.cfg.Targets {
-			if r := m.result(t.Name); r.Err != nil {
-				out = append(out, bot.Finding{Key: "probe:" + t.Name, Subject: t.Host, What: t.Name,
-					Msg: fmt.Sprintf("无法访问（%v）", r.Err)})
-			}
+// loadState reads the history, setting a damaged file aside rather than
+// refusing to start: monitoring matters more than its past.
+func (m *Module) loadState() *state {
+	st := newState()
+	if m.path != "" {
+		s, err := load(m.path)
+		if err == nil {
+			st = s
+		} else {
+			aside := m.path + ".broken-" + m.now().UTC().Format("20060102T150405Z")
+			m.logWarn("probe history unreadable, starting a new one", "err", err, "kept", aside)
+			os.Rename(m.path, aside)
 		}
-		return out
-	}}}
+	}
+	for name := range st.Targets {
+		if !slices.ContainsFunc(m.cfg.Targets, func(t Target) bool { return t.Name == name }) {
+			delete(st.Targets, name) // target removed from the configuration
+		}
+	}
+	m.initReports(st, m.now())
+	return st
+}
+
+func (m *Module) logWarn(msg string, args ...any) {
+	if m.env.Log != nil {
+		m.env.Log.Warn(msg, args...)
+	}
+}
+
+// Checks implements bot.Module: probes every target (and the controls) at
+// once on every evaluation; the alert engine's sustain absorbs a single
+// lost probe.
+func (m *Module) Checks() []bot.Check {
+	return []bot.Check{{Name: "probe", Run: m.check}}
+}
+
+func (m *Module) check(ctx context.Context) []bot.Finding {
+	all := append(slices.Clone(m.cfg.Targets), m.cfg.Controls...)
+	res := m.probeAll(ctx, all)
+	if ctx.Err() != nil {
+		return nil // shutting down: these failures are ours
+	}
+	offline := len(m.cfg.Controls) > 0
+	for _, c := range m.cfg.Controls {
+		if res[c.Name].Err == nil {
+			offline = false
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.offline = offline
+	if offline {
+		// This machine lost its own connection: what it sees of the targets
+		// says nothing about them. Record nothing, keep the alerts as they
+		// were (no false "down", no false "recovered").
+		return append(slices.Clone(m.held), bot.Finding{
+			Key: "self:probe-offline", What: "外网连接",
+			Msg: "不通（对照目标全部失败），探测结果暂不计入",
+		})
+	}
+	var out []bot.Finding
+	for _, t := range m.cfg.Targets {
+		r := res[t.Name]
+		m.last[t.Name] = r
+		m.st.record(t.Name, r.At, r.Err, r.Latency)
+		if r.Err != nil {
+			out = append(out, bot.Finding{Key: "probe:" + t.Name, Subject: t.Host, What: t.Name,
+				Msg: fmt.Sprintf("无法访问（%v）", r.Err)})
+		}
+	}
+	m.dirty = true
+	m.held = out
+	return out
 }
 
 // Commands implements bot.Module.
 func (m *Module) Commands() []bot.Command {
-	return []bot.Command{{Name: "probe", Aliases: []string{"p"}, Help: "外部探测：其他机器是否可达", Run: m.cmdProbe}}
+	return []bot.Command{
+		{Name: "probe", Aliases: []string{"p"}, Help: "外部探测：现在能不能访问", Run: m.cmdProbe},
+		{Name: "uptime", Aliases: []string{"up"}, Help: "可用性：24 小时 / 7 天 / 30 天，本月预算，最近中断", Run: m.cmdUptime},
+	}
 }
 
-func (m *Module) result(name string) Result {
+// Jobs implements bot.Module: save the history now and then, and send the
+// reports when due.
+func (m *Module) Jobs() []bot.Job {
+	var jobs []bot.Job
+	if m.path != "" {
+		jobs = append(jobs, bot.Job{Name: "probe-save", Every: 5 * time.Minute, Delay: 5 * time.Minute, Run: m.saveIfDirty, SideEffects: true})
+	}
+	if m.cfg.WeeklyReport || m.cfg.MonthlyReport {
+		jobs = append(jobs, bot.Job{Name: "probe-report", Every: 10 * time.Minute, Delay: time.Minute, Run: m.reportIfDue, SideEffects: true})
+	}
+	return jobs
+}
+
+// Stop implements bot.Stopper: keep what was recorded since the last save.
+func (m *Module) Stop(ctx context.Context) {
+	if err := m.saveIfDirty(ctx); err != nil {
+		m.logWarn("probe history not saved", "err", err)
+	}
+}
+
+func (m *Module) saveIfDirty(context.Context) error {
+	if m.path == "" {
+		return nil
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.last[name]
+	if !m.dirty {
+		m.mu.Unlock()
+		return nil
+	}
+	raw, err := json.Marshal(m.st) // snapshot under the lock, write outside it
+	m.dirty = false
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return writeFile(m.path, raw)
 }
 
-// runAll probes every target concurrently and stores the results.
-func (m *Module) runAll(ctx context.Context) {
+// probeAll probes targets concurrently.
+func (m *Module) probeAll(ctx context.Context, ts []Target) map[string]Result {
+	out := make(map[string]Result, len(ts))
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, t := range m.cfg.Targets {
+	for _, t := range ts {
 		wg.Go(func() {
 			start := m.now()
 			err := m.probe(ctx, t)
 			r := Result{At: start, Err: err, Latency: m.now().Sub(start)}
-			m.mu.Lock()
-			m.last[t.Name] = r
-			m.mu.Unlock()
+			mu.Lock()
+			out[t.Name] = r
+			mu.Unlock()
 		})
 	}
 	wg.Wait()
+	return out
 }
 
 func (m *Module) probe(ctx context.Context, t Target) error {
@@ -204,44 +370,12 @@ func short(err error) error {
 	return err
 }
 
-func (m *Module) counts() (ok, probed int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, t := range m.cfg.Targets {
-		if r, done := m.last[t.Name]; done {
-			probed++
-			if r.Err == nil {
-				ok++
-			}
-		}
-	}
-	return ok, probed
-}
-
-// Summary implements bot.Summarizer.
-func (m *Module) Summary(context.Context) ([]string, error) {
-	ok, probed := m.counts()
-	if probed == 0 {
-		return []string{"探测  进行中"}, nil
-	}
-	l := fmt.Sprintf("探测  %d/%d 可达", ok, len(m.cfg.Targets))
-	if ok < len(m.cfg.Targets) {
-		var bad []string
-		for _, t := range m.cfg.Targets {
-			if r := m.result(t.Name); r.Err != nil {
-				bad = append(bad, t.Host+" "+t.Name)
-			}
-		}
-		l += "（" + strings.Join(bad, "，") + " 不可达）"
-	}
-	return []string{l}, nil
-}
-
 func (m *Module) cmdProbe(ctx context.Context, _ bot.Request) (message.Message, error) {
-	m.runAll(ctx) // a fresh look, not the last evaluation's
+	// A fresh look, not recorded: history only counts the regular rounds.
+	res := m.probeAll(ctx, append(slices.Clone(m.cfg.Targets), m.cfg.Controls...))
 	var rows []string
-	for _, t := range m.cfg.Targets {
-		r := m.result(t.Name)
+	line := func(label string, t Target) {
+		r := res[t.Name]
 		state := fmt.Sprintf("✅ %dms", r.Latency.Milliseconds())
 		if r.Err != nil {
 			state = "❌ " + r.Err.Error()
@@ -250,7 +384,13 @@ func (m *Module) cmdProbe(ctx context.Context, _ bot.Request) (message.Message, 
 		if t.HTTP != "" {
 			what = t.HTTP
 		}
-		rows = append(rows, t.Host+" "+t.Name+"  "+state, "  "+what)
+		rows = append(rows, label+"  "+state, "  "+what)
+	}
+	for _, t := range m.cfg.Targets {
+		line(t.Host+" "+t.Name, t)
+	}
+	for _, c := range m.cfg.Controls {
+		line("对照 "+c.Name, c)
 	}
 	return message.Message{Icon: "📡", Title: m.env.Host + " 外部探测", After: "（从这台机器看别的机器）", Pre: strings.Join(rows, "\n")}, nil
 }

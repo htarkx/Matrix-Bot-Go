@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/htarkx/Matrix-Bot-Go/internal/alert"
+	"github.com/htarkx/Matrix-Bot-Go/internal/message"
 	"strings"
 	"testing"
 	"time"
@@ -186,3 +187,89 @@ func TestAlertWording(t *testing.T) {
 		t.Errorf("hint %q", hint)
 	}
 }
+
+type postingModule struct {
+	NoChecks
+	NoCommands
+	env     *Env
+	stopped chan struct{}
+}
+
+func (p *postingModule) Jobs() []Job {
+	return []Job{{Name: "report", Every: time.Hour, Run: func(ctx context.Context) error {
+		return p.env.Post(ctx, message.Message{Icon: "📈", Title: "周报"})
+	}}}
+}
+func (p *postingModule) Stop(context.Context) { close(p.stopped) }
+
+// A module's Post lands in the alerts room without a push (m.notice); its
+// Stop runs once the bot shuts down.
+func TestPostAndStop(t *testing.T) {
+	hs, hsSrv := newFakeHS(t)
+	_, tgSrv := newFakeTG(t)
+	mod := &postingModule{stopped: make(chan struct{})}
+	factories := map[string]Factory{"rep": func(env Env, _ json.RawMessage) (Module, error) {
+		mod.env = &env
+		if env.Interval != time.Second {
+			t.Errorf("Env.Interval = %v", env.Interval)
+		}
+		return mod, nil
+	}}
+	b := testBot(t, hsSrv, tgSrv, func(c *config.BotConfig) { c.Modules = config.Modules{{Name: "rep"}} }, factories)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { b.Run(ctx); close(done) }()
+	alerts := waitFor(t, func() string { return hs.alias("#watch-alerts:ex.org") })
+	hs.setMember(alerts, "@admin:ex.org", "join")
+	waitFor(t, func() string { return lastBody(hs.sentTo(alerts), "周报") })
+	for _, ev := range hs.sentTo(alerts) {
+		if body, _ := ev.Content["body"].(string); strings.Contains(body, "周报") && ev.Content["msgtype"] != "m.notice" {
+			t.Errorf("report msgtype %v", ev.Content["msgtype"])
+		}
+	}
+	cancel()
+	<-done
+	select {
+	case <-mod.stopped:
+	default:
+		t.Error("Stop not called")
+	}
+}
+
+// -exec runs cache-filling jobs but never side-effecting ones, and posts
+// nothing.
+func TestExecSkipsSideEffects(t *testing.T) {
+	hs, hsSrv := newFakeHS(t)
+	_, tgSrv := newFakeTG(t)
+	var ran []string
+	factories := map[string]Factory{"m": func(env Env, _ json.RawMessage) (Module, error) {
+		return struct {
+			NoChecks
+			NoCommands
+			jobsOf
+		}{jobsOf: jobsOf{
+			{Name: "fill", Every: time.Hour, Run: func(context.Context) error { ran = append(ran, "fill"); return nil }},
+			{Name: "save", Every: time.Hour, SideEffects: true, Run: func(context.Context) error { ran = append(ran, "save"); return nil }},
+			{Name: "post", Every: time.Hour, Run: func(ctx context.Context) error {
+				ran = append(ran, "post")
+				return env.Post(ctx, message.Message{Title: "x"})
+			}},
+		}}, nil
+	}}
+	b := testBot(t, hsSrv, tgSrv, func(c *config.BotConfig) { c.Modules = config.Modules{{Name: "m"}} }, factories)
+	if _, err := b.Exec(context.Background(), "h"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ran, ",") != "fill,post" {
+		t.Errorf("ran %v", ran)
+	}
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if len(hs.sent) != 0 || len(hs.created) != 0 {
+		t.Errorf("exec touched Matrix: %d sent, %d rooms", len(hs.sent), len(hs.created))
+	}
+}
+
+type jobsOf []Job
+
+func (j jobsOf) Jobs() []Job { return j }

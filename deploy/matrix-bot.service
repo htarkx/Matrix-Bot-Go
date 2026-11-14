@@ -6,6 +6,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+StateDirectory=matrix-bot
 Type=simple
 User=matrix-bot
 Group=matrix-bot

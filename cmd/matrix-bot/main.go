@@ -13,8 +13,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+	_ "time/tzdata" // report time zones without relying on the host's zoneinfo
 
 	"github.com/htarkx/Matrix-Bot-Go/internal/bot"
 	"github.com/htarkx/Matrix-Bot-Go/internal/config"
@@ -51,6 +53,7 @@ func main() {
 		checkOnly   = flag.Bool("check-config", false, "validate the configuration and exit")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 		execCmd     = flag.String("exec", "", "run one command (e.g. \"d\") for the first bot, print the answer and exit; sends nothing")
+		stateDir    = flag.String("state", os.Getenv("STATE_DIRECTORY"), "directory for state that survives restarts (systemd StateDirectory=)")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -58,13 +61,13 @@ func main() {
 		return
 	}
 	log := newLogger()
-	if err := run(log, *configPath, *credentials, *dryRun, *checkOnly, *execCmd); err != nil {
+	if err := run(log, *configPath, *credentials, *stateDir, *dryRun, *checkOnly, *execCmd); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool, execCmd string) error {
+func run(log *slog.Logger, configPath, credDir, stateDir string, dryRun, checkOnly bool, execCmd string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -102,7 +105,7 @@ func run(log *slog.Logger, configPath, credDir string, dryRun, checkOnly bool, e
 		}
 		b, err := bot.New(bot.Options{
 			Config: bc, Host: cfg.Host, Matrix: mx, MatrixCfg: cfg.Matrix, Telegram: tg,
-			Factories: factories, DryRun: dryRun, Log: log, Secret: secret,
+			Factories: factories, DryRun: dryRun, Log: log, Secret: secret, StateDir: botStateDir(stateDir, bc.ID, len(cfg.Bots)),
 		})
 		if err != nil {
 			return err
@@ -144,6 +147,14 @@ func newLogger() *slog.Logger {
 		}
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
+}
+
+// botStateDir gives each bot its own subdirectory when there are several.
+func botStateDir(dir, botID string, bots int) string {
+	if dir == "" || bots == 1 {
+		return dir
+	}
+	return filepath.Join(dir, botID)
 }
 
 func envOr(key, def string) string {
