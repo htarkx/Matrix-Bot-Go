@@ -29,6 +29,10 @@ type bucket struct {
 	Fail   int                     `json:"fail"`
 	LatSum int64                   `json:"lat_ms"` // sum over successful probes
 	Lat    [len(latencyBins)]int32 `json:"lat"`    // histogram over latencyBins
+	// RTTSum / RTTN: TCP connect times (ms) of successful probes that
+	// connected (absent in history written before they were kept).
+	RTTSum int64 `json:"rtt_ms,omitempty"`
+	RTTN   int   `json:"rtt_n,omitempty"`
 }
 
 // Incident is one outage: from the first failed probe to the first good one.
@@ -66,7 +70,7 @@ func (s *state) target(name string) *targetHist {
 }
 
 // record adds one probe result at time at.
-func (s *state) record(name string, at time.Time, err error, latency time.Duration) {
+func (s *state) record(name string, at time.Time, err error, latency, rtt time.Duration) {
 	h := s.target(name)
 	start := at.Truncate(time.Hour).Unix()
 	if n := len(h.Hours); n == 0 || h.Hours[n-1].Start < start {
@@ -84,6 +88,10 @@ func (s *state) record(name string, at time.Time, err error, latency time.Durati
 		return
 	}
 	b.OK++
+	if rtt > 0 {
+		b.RTTSum += rtt.Milliseconds()
+		b.RTTN++
+	}
 	ms := latency.Milliseconds()
 	b.LatSum += ms
 	for i, upper := range latencyBins {
@@ -108,6 +116,8 @@ type Window struct {
 	OK, Fail int
 	LatSum   int64
 	Lat      [len(latencyBins)]int32
+	RTTSum   int64
+	RTTN     int
 }
 
 // window sums the hours that start in [from, to).
@@ -123,6 +133,8 @@ func (h *targetHist) window(from, to time.Time) Window {
 		w.OK += b.OK
 		w.Fail += b.Fail
 		w.LatSum += b.LatSum
+		w.RTTSum += b.RTTSum
+		w.RTTN += b.RTTN
 		for j, n := range b.Lat {
 			w.Lat[j] += n
 		}
@@ -146,6 +158,14 @@ func (w Window) MeanMs() int64 {
 		return 0
 	}
 	return w.LatSum / int64(w.OK)
+}
+
+// MeanRTTMs is the mean TCP connect time; 0 without data.
+func (w Window) MeanRTTMs() int64 {
+	if w.RTTN == 0 {
+		return 0
+	}
+	return w.RTTSum / int64(w.RTTN)
 }
 
 // PercentileMs is an upper bound of the q-th latency percentile (0..1),

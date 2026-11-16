@@ -77,19 +77,32 @@ or above `loss_alert_pct` (default 5, 0 = off) in either direction raises
 `call:loss`; nothing is measured, so nothing alerts, when nobody is calling.
 
 **Watching each other.** A bot cannot report its own host going down. Run a
-second, Telegram-only bot (no `matrix` section, `telegram.commands: false`
-so the main bot keeps `getUpdates`) on another machine with the `probe`
-module pointed at the first host's services, and let the first host probe
-the second. Probes run on every alert evaluation; `sustain` absorbs a single
-lost probe. HTTP probes do not follow redirects and verify TLS. Each target
-names the `host` it runs on: that machine is the subject of its alerts.
+second bot on another machine with the `probe` module pointed at the first
+host's services, and let the first host probe the second. The second bot may
+use Matrix too (its own, non-admin account and rooms), but its probe alerts
+should also go out of band (`out_of_band: ["probe:", "self:"]`), since the
+homeserver may be what is down; with `telegram.commands: false` the main bot
+keeps `getUpdates`. Probes run on every alert evaluation; `sustain` absorbs a
+single lost probe. HTTP probes do not follow redirects and verify TLS. Each
+target names the `host` it runs on: that machine is the subject of its alerts.
+
+**Latency: round trip vs. request.** Two figures, because they differ by
+design. *Round trip* (往返) is the TCP connect alone: one RTT, about what
+`ping` shows, and the same in both directions. *Request* (请求) is a whole
+HTTPS probe on a fresh connection (keep-alives are off): TCP connect, TLS
+handshake, the HTTP exchange, so about three round trips, plus the server's
+own time. A TCP target only has the round trip. So with 88 ms between two
+machines, A probing B's OpenVPN port shows 88 ms while B probing A's
+websites shows a round trip of 88 ms and requests of about 300 ms.
 
 **Availability ("how many nines").** The probe module records every check
 round in hourly buckets (35 days) plus incidents (a year) in
 `$STATE_DIRECTORY/probe.json` (`-state`, systemd `StateDirectory=`), saved
 every 5 minutes and on shutdown. Availability is good rounds / recorded
 rounds against `slo_pct` (default 99.9); the downtime budget is what the SLO
-allows in the calendar month. `controls` are outside services (a public
+allows in the calendar month. Tables keep everything before the last column
+ASCII (names come last), so they line up whatever a chat client's font
+does with CJK. `controls` are outside services (a public
 resolver, a 204 endpoint): when all of them fail too, this machine is
 offline, so the round is neither recorded nor alerted (alerts are held, not
 resolved). With `weekly_report` / `monthly_report` a report is posted

@@ -26,7 +26,7 @@ func (c *clock) add(d time.Duration) { c.t = c.t.Add(d) }
 func (c *clock) set(t time.Time)     { c.t = t }
 func at(s string) time.Time          { t, _ := time.ParseInLocation("2006-01-02 15:04", s, zurich); return t }
 func cfgJSON(extra string) json.RawMessage {
-	return json.RawMessage(`{"targets":[{"host":"fra","name":"Matrix","tcp":"127.0.0.1:1"},{"host":"fra","name":"通话","tcp":"127.0.0.1:1"}],"timezone":"Europe/Zurich"` + extra + `}`)
+	return json.RawMessage(`{"targets":[{"host":"fra","name":"Matrix","tcp":"127.0.0.1:1"},{"host":"fra","name":"通话","http":"https://127.0.0.1:1/"}],"timezone":"Europe/Zurich"` + extra + `}`)
 }
 
 func uptimeModule(t *testing.T, dir string, c *clock, posted *[]message.Message, extra string) *Module {
@@ -49,7 +49,7 @@ func uptimeModule(t *testing.T, dir string, c *clock, posted *[]message.Message,
 func feed(m *Module, c *clock, n int, errFor map[string]error) {
 	for range n {
 		for _, t := range m.cfg.Targets {
-			m.st.record(t.Name, c.t, errFor[t.Name], 300*time.Millisecond)
+			m.st.record(t.Name, c.t, errFor[t.Name], 300*time.Millisecond, 88*time.Millisecond)
 		}
 		m.dirty = true
 		c.add(m.interval)
@@ -80,7 +80,7 @@ func TestWindowAndIncidents(t *testing.T) {
 	if in.End-in.Start != 180 || in.Reason != "HTTP 502" {
 		t.Errorf("incident %+v", in)
 	}
-	if got := m.incidentLine("fra", "通话", in, c.t); got != "11-10 10:50–10:53 fra 通话 HTTP 502（3 分钟）" {
+	if got := m.incidentLine("fra", "通话", in, c.t); got != "11-10 10:50–10:53 通话 HTTP 502（3 分钟）" {
 		t.Errorf("incident line %q", got)
 	}
 	if p, ok := m.st.Targets["Matrix"].window(at("2026-11-10 00:00"), at("2026-11-11 00:00")).Availability(); !ok || pct(p, ok) != "100%" {
@@ -94,7 +94,7 @@ func TestPctNeverRoundsUp(t *testing.T) {
 			t.Errorf("pct(%v) = %s, want %s", in, got, want)
 		}
 	}
-	if pct(0, false) != "—" {
+	if pct(0, false) != "-" {
 		t.Error("no data")
 	}
 }
@@ -103,7 +103,7 @@ func TestHourCap(t *testing.T) {
 	s := newState()
 	start := at("2026-01-01 00:00")
 	for h := range hourBuckets + 50 {
-		s.record("x", start.Add(time.Duration(h)*time.Hour), nil, time.Millisecond)
+		s.record("x", start.Add(time.Duration(h)*time.Hour), nil, time.Millisecond, 0)
 	}
 	if n := len(s.Targets["x"].Hours); n != hourBuckets {
 		t.Errorf("%d hours kept, want %d", n, hourBuckets)
@@ -230,27 +230,18 @@ func TestReportContent(t *testing.T) {
 	feed(m, c, week/2-20, nil)
 	r := m.report("周报", at("2026-11-09 00:00"), at("2026-11-16 00:00"))
 	text := r.Plain()
-	line := func(prefix string) string {
-		for _, l := range strings.Split(text, "\n") {
-			if strings.HasPrefix(l, prefix) {
-				return l
-			}
-		}
-		return ""
-	}
-	if l := line("✅ fra Matrix"); !strings.Contains(l, " 100% ") || !strings.Contains(l, "停机 0 秒，延迟 均值 300ms，P95 ≤300ms") {
-		t.Errorf("Matrix row %q", l)
-	}
-	// 10 minutes in a week is 0.099 %: 99.90 %, just within three nines
-	// (a week's budget is 10.08 minutes).
-	if l := line("✅ fra 通话"); !strings.Contains(l, " 99.90% ") || !strings.Contains(l, "停机 10 分钟") {
-		t.Errorf("通话 row %q", l)
-	}
+	// one host: names without it, the host in the title; each target is a
+	// name line followed by an ASCII-aligned figures line
 	for _, want := range []string{
-		"📈 可用性周报 11-09 至 11-15（目标 99.9%，us 观测）",
+		"✅ Matrix\n   100%     停机 0s     往返 300ms\n",
+		// 10 minutes in a week is 0.099 %: 99.90 %, just within three
+		// nines (a week's budget is 10.08 minutes)
+		"✅ 通话\n   99.90%   停机 10m    往返 88ms   请求 300ms（P95 ≤300ms）\n",
+		"📈 可用性周报 11-09 至 11-15（fra，目标 99.9%，us 观测）",
 		"中断 1 次：",
-		"11-12 12:00–12:10 fra 通话 HTTP 502（10 分钟）",
+		"11-12 12:00–12:10 通话 HTTP 502（10 分钟）",
 		"数据覆盖 100.0%",
+		"往返 = TCP 建连耗时",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report lacks %q:\n%s", want, text)
@@ -266,9 +257,33 @@ func TestUptimeCommand(t *testing.T) {
 	feed(m, c, 10, nil)
 	msg, _ := m.cmdUptime(context.Background(), bot.Request{})
 	text := msg.Plain()
-	for _, want := range []string{"本月预算 43 分钟", "fra Matrix", "已用 50 分钟 ❌", "已用 0 秒 ✅", "最近中断：", "fra Matrix 超时（50 分钟）"} {
+	for _, want := range []string{
+		"（fra，目标 99.9%，本月停机预算 43 分钟）",
+		"24h      7d       30d      本月停机\n",
+		"96.51%   98.29%   98.29%   50m     ❌ Matrix\n",
+		"100%     100%     100%     0s      ✅ 通话\n",
+		"最近中断：", "Matrix 超时（50 分钟）",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("uptime lacks %q:\n%s", want, text)
+		}
+	}
+	// targets on several machines carry their host
+	m.cfg.Targets[1].Host = "us2"
+	msg, _ = m.cmdUptime(context.Background(), bot.Request{})
+	if text := msg.Plain(); !strings.Contains(text, "❌ fra Matrix") || !strings.Contains(text, "✅ us2 通话") ||
+		!strings.Contains(text, "（目标 99.9%，") {
+		t.Errorf("several hosts:\n%s", text)
+	}
+}
+
+func TestDur(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0: "0s", 59 * time.Second: "59s", 10 * time.Minute: "10m", 43*time.Minute + 12*time.Second: "43m",
+		65 * time.Minute: "1h05m", 26 * time.Hour: "26h00m",
+	} {
+		if got := dur(d); got != want {
+			t.Errorf("dur(%v) = %q, want %q", d, got, want)
 		}
 	}
 }

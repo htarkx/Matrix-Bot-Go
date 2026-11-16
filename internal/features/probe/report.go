@@ -92,9 +92,10 @@ func (m *Module) budget(d time.Duration) time.Duration {
 func (m *Module) down(w Window) time.Duration { return time.Duration(w.Fail) * m.interval }
 
 // pct formats an availability, never rounding up to 100%: "99.98%".
+// ASCII only, so the columns of a table line up in any chat font.
 func pct(p float64, ok bool) string {
 	if !ok {
-		return "—"
+		return "-"
 	}
 	if p >= 100 {
 		return "100%"
@@ -120,16 +121,56 @@ func minutes(d time.Duration) string {
 	return fmt.Sprintf("%d 分钟", int(d.Round(time.Minute).Minutes()))
 }
 
+// dur is a short ASCII duration for table cells: "0s", "43m", "1h05m".
+func dur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute).Minutes()))
+	}
+	d = d.Round(time.Minute)
+	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// host is the one machine all targets run on, "" when they are on several.
+func (m *Module) host() string {
+	h := m.cfg.Targets[0].Host
+	for _, t := range m.cfg.Targets {
+		if t.Host != h {
+			return ""
+		}
+	}
+	return h
+}
+
+// label names a target, without its host when all targets share one.
+func (m *Module) label(host, name string) string {
+	if m.host() != "" {
+		return name
+	}
+	return host + " " + name
+}
+
+// seenFrom is "backbone-fra，" when all targets share a host, for titles.
+func (m *Module) seenFrom() string {
+	if h := m.host(); h != "" {
+		return h + "，"
+	}
+	return ""
+}
+
 func (m *Module) clock(unix int64) string { return time.Unix(unix, 0).In(m.loc).Format("01-02 15:04") }
 
-// incidentLine renders "11-14 17:27–17:30 通话服务 HTTP 502（3 分钟）".
+// incidentLine renders "11-14 17:27–17:30 通话服务 HTTP 502（3 分钟）",
+// with the host in front when targets are on several machines.
 func (m *Module) incidentLine(host, name string, in Incident, now time.Time) string {
 	end, span := "进行中", now.Sub(time.Unix(in.Start, 0))
 	if in.End != 0 {
 		end = time.Unix(in.End, 0).In(m.loc).Format("15:04")
 		span = time.Duration(in.End-in.Start) * time.Second
 	}
-	return fmt.Sprintf("%s–%s %s %s %s（%s）", m.clock(in.Start), end, host, name, in.Reason, minutes(span))
+	return fmt.Sprintf("%s–%s %s %s（%s）", m.clock(in.Start), end, m.label(host, name), in.Reason, minutes(span))
 }
 
 type tagged struct {
@@ -150,7 +191,9 @@ func (m *Module) incidents(from, to time.Time) []tagged {
 }
 
 // report renders a period: availability per target against the SLO,
-// downtime, incidents, latency and how much of the period was observed.
+// downtime, latency, incidents and how much of the period was observed.
+// Each target takes two lines, its name and then the figures, so the
+// figures line up whatever the names' widths in a chat font.
 func (m *Module) report(title string, from, to time.Time) message.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -161,16 +204,21 @@ func (m *Module) report(title string, from, to time.Time) message.Message {
 		w := m.st.Targets[t.Name].window(from, to)
 		p, ok := w.Availability()
 		coverage = min(coverage, float64(w.OK+w.Fail)/max(expected, 1))
-		lat := "—"
-		if w.OK > 0 {
-			lat = fmt.Sprintf("均值 %dms", w.MeanMs())
+		figures := fmt.Sprintf("   %s 停机 %s", human.Pad(pct(p, ok), 8), human.Pad(dur(m.down(w)), 6))
+		switch {
+		case w.OK == 0:
+		case t.TCP != "":
+			figures += fmt.Sprintf(" 往返 %dms", w.MeanMs())
+		default:
+			if rtt := w.MeanRTTMs(); rtt > 0 {
+				figures += " 往返 " + human.Pad(fmt.Sprintf("%dms", rtt), 6)
+			}
+			figures += fmt.Sprintf(" 请求 %dms", w.MeanMs())
 			if p95 := w.PercentileMs(0.95); p95 > 0 {
-				lat += fmt.Sprintf("，P95 ≤%dms", p95)
+				figures += fmt.Sprintf("（P95 ≤%dms）", p95)
 			}
 		}
-		rows = append(rows, fmt.Sprintf("%s %s %s 停机 %s，延迟 %s",
-			m.mark(p, ok), human.Pad(t.Host+" "+t.Name, 24), human.Pad(pct(p, ok), 8),
-			minutes(m.down(w)), lat))
+		rows = append(rows, m.mark(p, ok)+" "+m.label(t.Host, t.Name), figures)
 	}
 	ins := m.incidents(from, to)
 	if len(ins) > 0 {
@@ -187,13 +235,15 @@ func (m *Module) report(title string, from, to time.Time) message.Message {
 	return message.Message{
 		Icon:  "📈",
 		Title: fmt.Sprintf("可用性%s %s 至 %s", title, from.In(m.loc).Format("01-02"), last.Format("01-02")),
-		After: fmt.Sprintf("（目标 %.1f%%，%s 观测）", m.cfg.SLOPct, m.env.Host),
+		After: fmt.Sprintf("（%s目标 %.1f%%，%s 观测）", m.seenFrom(), m.cfg.SLOPct, m.env.Host),
 		Pre:   strings.Join(rows, "\n"),
-		Note: fmt.Sprintf("数据覆盖 %.1f%%（%s 自己断网或重启的时段不计）· 时间为 %s",
-			100*min(coverage, 1), m.env.Host, m.loc),
+		Note: fmt.Sprintf("数据覆盖 %.1f%%（%s 自己断网或重启的时段不计）· 时间为 %s\n%s · 均值，P95 为上界",
+			100*min(coverage, 1), m.env.Host, m.loc, latencyNote),
 	}
 }
 
+// cmdUptime is a table with only ASCII before the last column, so it lines
+// up in any chat font; the names (often CJK) come last.
 func (m *Module) cmdUptime(context.Context, bot.Request) (message.Message, error) {
 	now := m.now()
 	m.mu.Lock()
@@ -201,20 +251,20 @@ func (m *Module) cmdUptime(context.Context, bot.Request) (message.Message, error
 	ms := m.monthStart(now)
 	monthLen := ms.AddDate(0, 1, 0).Sub(ms)
 	allowed := m.budget(monthLen)
-	rows := []string{fmt.Sprintf("%s %s %s %s  本月预算 %s", human.Pad("", 24), human.Pad("24 小时", 8), human.Pad("7 天", 8), human.Pad("30 天", 8), minutes(allowed))}
+	rows := []string{human.Pad("24h", 9) + human.Pad("7d", 9) + human.Pad("30d", 9) + "本月停机"}
 	for _, t := range m.cfg.Targets {
 		h := m.st.Targets[t.Name]
 		cell := func(d time.Duration) string {
 			p, ok := h.window(now.Add(-d), now.Add(time.Hour)).Availability()
-			return human.Pad(pct(p, ok), 8)
+			return human.Pad(pct(p, ok), 9)
 		}
 		used := m.down(h.window(ms, now.Add(time.Hour)))
 		state := "✅"
 		if used > allowed {
 			state = "❌"
 		}
-		rows = append(rows, fmt.Sprintf("%s %s %s %s  已用 %s %s",
-			human.Pad(t.Host+" "+t.Name, 24), cell(24*time.Hour), cell(7*24*time.Hour), cell(30*24*time.Hour), minutes(used), state))
+		rows = append(rows, cell(24*time.Hour)+cell(7*24*time.Hour)+cell(30*24*time.Hour)+
+			human.Pad(dur(used), 8)+state+" "+m.label(t.Host, t.Name))
 	}
 	ins := m.incidents(now.Add(-30*24*time.Hour), now.Add(time.Hour))
 	if len(ins) > 0 {
@@ -227,8 +277,9 @@ func (m *Module) cmdUptime(context.Context, bot.Request) (message.Message, error
 		}
 	}
 	msg := message.Message{Icon: "📈", Title: m.env.Host + " 观测到的可用性",
-		After: fmt.Sprintf("（目标 %.1f%%）", m.cfg.SLOPct), Pre: strings.Join(rows, "\n"),
-		Note: "预算 = 本月按目标允许的停机时间；停机按失败的探测轮次计"}
+		After: fmt.Sprintf("（%s目标 %.1f%%，本月停机预算 %s）", m.seenFrom(), m.cfg.SLOPct, minutes(allowed)),
+		Pre:   strings.Join(rows, "\n"),
+		Note:  "预算 = 本月按目标允许的停机时间；停机按失败的探测轮次计"}
 	if m.offline {
 		msg.Note += "\n⚠ 最近一轮" + m.env.Host + "自己的外网不通，探测结果暂不计入"
 	}

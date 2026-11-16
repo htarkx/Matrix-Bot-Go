@@ -100,8 +100,13 @@ func TestProbes(t *testing.T) {
 		t.Errorf("summary %q, want %q", sum[0], want)
 	}
 	msg, _ := m.cmdProbe(context.Background(), bot.Request{})
-	if !strings.Contains(msg.Pre, "h ok  ✅") || !strings.Contains(msg.Pre, "h slow  ❌ 超时") {
+	if !strings.Contains(msg.Pre, "h ok  ✅ 往返 ") || !strings.Contains(msg.Pre, "ms，请求 ") ||
+		!strings.Contains(msg.Pre, "h port  ✅ 往返 ") || !strings.Contains(msg.Pre, "h slow  ❌ 超时") {
 		t.Errorf("probe command:\n%s", msg.Pre)
+	}
+	// the TCP connect of an HTTP probe is kept as its round trip
+	if w := m.st.Targets["ok"].window(time.Now().Add(-time.Hour), time.Now().Add(time.Hour)); w.RTTN != 1 || w.OK != 1 {
+		t.Errorf("ok window %+v", w)
 	}
 }
 

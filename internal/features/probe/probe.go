@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,11 +65,15 @@ type Target struct {
 	TCP string `json:"tcp"`
 }
 
-// Result is a probe's outcome.
+// Result is a probe's outcome. Latency is the whole probe; RTT is its TCP
+// connect alone (one round trip, about what ping shows). For a TCP target
+// both are the same; an HTTPS probe takes about three round trips (TCP,
+// TLS, the request) plus the server's own time.
 type Result struct {
 	At      time.Time
 	Err     error
 	Latency time.Duration
+	RTT     time.Duration // 0 when no connection was made
 }
 
 // Module is the probe module.
@@ -250,7 +255,7 @@ func (m *Module) check(ctx context.Context) []bot.Finding {
 	for _, t := range m.cfg.Targets {
 		r := res[t.Name]
 		m.last[t.Name] = r
-		m.st.record(t.Name, r.At, r.Err, r.Latency)
+		m.st.record(t.Name, r.At, r.Err, r.Latency, r.RTT)
 		if r.Err != nil {
 			out = append(out, bot.Finding{Key: "probe:" + t.Name, Subject: t.Host, What: t.Name,
 				Msg: fmt.Sprintf("无法访问（%v）", r.Err)})
@@ -315,8 +320,8 @@ func (m *Module) probeAll(ctx context.Context, ts []Target) map[string]Result {
 	for _, t := range ts {
 		wg.Go(func() {
 			start := m.now()
-			err := m.probe(ctx, t)
-			r := Result{At: start, Err: err, Latency: m.now().Sub(start)}
+			rtt, err := m.probe(ctx, t)
+			r := Result{At: start, Err: err, Latency: m.now().Sub(start), RTT: rtt}
 			mu.Lock()
 			out[t.Name] = r
 			mu.Unlock()
@@ -326,31 +331,54 @@ func (m *Module) probeAll(ctx context.Context, ts []Target) map[string]Result {
 	return out
 }
 
-func (m *Module) probe(ctx context.Context, t Target) error {
+// probe reaches t once and returns how long its TCP connect took.
+func (m *Module) probe(ctx context.Context, t Target) (rtt time.Duration, err error) {
 	ctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout.Duration)
 	defer cancel()
 	if t.TCP != "" {
+		start := time.Now()
 		c, err := m.dial(ctx, "tcp", t.TCP)
 		if err != nil {
-			return short(err)
+			return 0, short(err)
 		}
-		return c.Close()
+		rtt = time.Since(start)
+		return rtt, c.Close()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.HTTP, nil)
+	// Keep-alives are off, so every probe connects anew; with several
+	// addresses (IPv4 and IPv6) the connection that is used counts.
+	var mu sync.Mutex
+	started := map[string]time.Time{}
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, addr string) {
+			mu.Lock()
+			started[addr] = time.Now()
+			mu.Unlock()
+		},
+		ConnectDone: func(_, addr string, err error) {
+			mu.Lock()
+			if err == nil && rtt == 0 {
+				rtt = time.Since(started[addr])
+			}
+			mu.Unlock()
+		},
+	}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodGet, t.HTTP, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("User-Agent", "Matrix-Bot-Go probe")
 	resp, err := m.http.Do(req)
+	mu.Lock()
+	defer mu.Unlock()
 	if err != nil {
-		return short(err)
+		return rtt, short(err)
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
 	if resp.StatusCode != t.Expect {
-		return fmt.Errorf("HTTP %d（应为 %d）", resp.StatusCode, t.Expect)
+		return rtt, fmt.Errorf("HTTP %d（应为 %d）", resp.StatusCode, t.Expect)
 	}
-	return nil
+	return rtt, nil
 }
 
 // short trims Go's nested network errors to their gist for a chat line.
@@ -376,7 +404,7 @@ func (m *Module) cmdProbe(ctx context.Context, _ bot.Request) (message.Message, 
 	var rows []string
 	line := func(label string, t Target) {
 		r := res[t.Name]
-		state := fmt.Sprintf("✅ %dms", r.Latency.Milliseconds())
+		state := "✅ " + latencyText(t, r.RTT, r.Latency)
 		if r.Err != nil {
 			state = "❌ " + r.Err.Error()
 		}
@@ -392,5 +420,21 @@ func (m *Module) cmdProbe(ctx context.Context, _ bot.Request) (message.Message, 
 	for _, c := range m.cfg.Controls {
 		line("对照 "+c.Name, c)
 	}
-	return message.Message{Icon: "📡", Title: m.env.Host + " 外部探测", After: "（从这台机器看别的机器）", Pre: strings.Join(rows, "\n")}, nil
+	return message.Message{Icon: "📡", Title: m.env.Host + " 外部探测", After: "（从这台机器看别的机器）",
+		Pre: strings.Join(rows, "\n"), Note: latencyNote}, nil
+}
+
+// latencyNote explains why a request takes several times the round trip.
+const latencyNote = "往返 = TCP 建连耗时，约等于 ping 的 RTT，两个方向一样；" +
+	"请求 = 一次完整的 HTTPS 请求（建连 + TLS 握手 + HTTP，约 3 个往返，再加服务端处理）"
+
+// latencyText is "往返 88ms，请求 325ms" (HTTP) or "往返 88ms" (TCP).
+func latencyText(t Target, rtt, total time.Duration) string {
+	if t.TCP != "" {
+		return fmt.Sprintf("往返 %dms", total.Milliseconds())
+	}
+	if rtt == 0 {
+		return fmt.Sprintf("请求 %dms", total.Milliseconds())
+	}
+	return fmt.Sprintf("往返 %dms，请求 %dms", rtt.Milliseconds(), total.Milliseconds())
 }
