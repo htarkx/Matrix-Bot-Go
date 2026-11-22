@@ -2,14 +2,18 @@ package probe
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +114,59 @@ func TestProbes(t *testing.T) {
 	}
 }
 
+// HTTP probes send HEAD unless told otherwise, and resume TLS sessions, but
+// do a full handshake again after fullHandshakeEvery.
+func TestMethodAndResumption(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, fmt.Sprintf("%s %s resumed=%v", r.Method, r.URL.Path, r.TLS.DidResume))
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	cfg, _ := json.Marshal(map[string]any{"targets": []map[string]any{
+		{"host": "h", "name": "head", "http": srv.URL + "/head"},
+		{"host": "h", "name": "get", "http": srv.URL + "/get", "method": "GET"},
+	}})
+	m, err := newWithClock(bot.Env{Log: slog.New(slog.DiscardHandler)}, cfg, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	m.http.Transport.(*http.Transport).TLSClientConfig.RootCAs = roots
+
+	round := func() []string {
+		t.Helper()
+		mu.Lock()
+		seen = nil
+		mu.Unlock()
+		for _, tg := range m.cfg.Targets { // one at a time: a ticket only exists after a handshake
+			if _, err := m.probe(context.Background(), tg); err != nil {
+				t.Fatalf("%s: %v", tg.Name, err)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+	full := []string{"HEAD /head resumed=false", "GET /get resumed=true"}
+	resumed := []string{"HEAD /head resumed=true", "GET /get resumed=true"}
+	for i, want := range [][]string{full, resumed, resumed} {
+		if got := round(); !slices.Equal(got, want) {
+			t.Errorf("round %d: %q, want %q", i, got, want)
+		}
+		clock = clock.Add(30 * time.Second)
+	}
+	clock = clock.Add(fullHandshakeEvery)
+	if got := round(); !slices.Equal(got, full) {
+		t.Errorf("after %v: %q, want a full handshake first", fullHandshakeEvery, got)
+	}
+}
+
 func TestSummaryBeforeFirstRound(t *testing.T) {
 	m := newModule(t, `{"targets":[{"host":"h","name":"x","tcp":"127.0.0.1:1"}]}`)
 	if s, _ := m.Summary(context.Background()); s[0] != "探测  进行中" {
@@ -128,6 +185,8 @@ func TestConfig(t *testing.T) {
 		`{"targets":[{"host":"h","name":"a","tcp":"no-port"}]}`:                                               "missing port",
 		`{"targets":[{"host":"h","name":"a","tcp":"x:1"},{"host":"h","name":"a","tcp":"y:1"}]}`:               "duplicate",
 		`{"targets":[{"host":"h","name":"a","tcp":"x:1"}],"bogus":1}`:                                         "unknown field",
+		`{"targets":[{"host":"h","name":"a","http":"https://x","method":"POST"}]}`:                            "HEAD or GET",
+		`{"targets":[{"host":"h","name":"a","tcp":"x:1","method":"GET"}]}`:                                    "for http targets",
 		`{"targets":[{"host":"h","name":"a","http":"https://x"},{"host":"h","name":"b","http":"https://y"}]}`: "",
 	} {
 		_, err := New(bot.Env{}, json.RawMessage(cfg))

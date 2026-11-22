@@ -13,6 +13,7 @@ package probe
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,9 +58,11 @@ type Target struct {
 	// ("backbone-fra：通话服务 无法访问"). Name is the service on it.
 	Host string `json:"host"`
 	Name string `json:"name"`
-	// HTTP is a URL fetched with GET (redirects are not followed, TLS is
-	// verified); the answer must have status Expect (default 200).
+	// HTTP is a URL requested with Method (HEAD by default, GET for servers
+	// that do not answer HEAD); redirects are not followed, TLS is verified.
+	// The answer must have status Expect (default 200).
 	HTTP   string `json:"http"`
+	Method string `json:"method"`
 	Expect int    `json:"expect"`
 	// TCP is host:port that must accept a connection.
 	TCP string `json:"tcp"`
@@ -149,14 +152,21 @@ func newWithClock(env bot.Env, raw json.RawMessage, now func() time.Time) (*Modu
 			errs = append(errs, fmt.Errorf("%s %q: set exactly one of http and tcp", what, t.Name))
 		case t.HTTP != "" && !strings.HasPrefix(t.HTTP, "http://") && !strings.HasPrefix(t.HTTP, "https://"):
 			errs = append(errs, fmt.Errorf("%s %q: http must be an http(s) URL", what, t.Name))
+		case t.TCP != "" && t.Method != "":
+			errs = append(errs, fmt.Errorf("%s %q: method is for http targets", what, t.Name))
 		case t.TCP != "":
 			if _, _, err := net.SplitHostPort(t.TCP); err != nil {
 				errs = append(errs, fmt.Errorf("%s %q: tcp: %w", what, t.Name, err))
 			}
+		case t.Method != "" && t.Method != http.MethodHead && t.Method != http.MethodGet:
+			errs = append(errs, fmt.Errorf("%s %q: method must be HEAD or GET", what, t.Name))
 		}
 		seen[t.Name] = true
 		if t.HTTP != "" && t.Expect == 0 {
 			t.Expect = http.StatusOK
+		}
+		if t.HTTP != "" && t.Method == "" {
+			t.Method = http.MethodHead
 		}
 	}
 	for i := range c.Targets {
@@ -176,7 +186,23 @@ func newWithClock(env bot.Env, raw json.RawMessage, now func() time.Time) (*Modu
 			// The status of the first answer is the check: a 302 to a login
 			// page means something else than a 200.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-			Transport:     &http.Transport{DisableKeepAlives: true, Proxy: nil},
+			Transport: &http.Transport{
+				// Every probe connects anew, as a visitor would: an existing
+				// connection can keep working while new ones fail.
+				DisableKeepAlives: true,
+				Proxy:             nil,
+				ForceAttemptHTTP2: true, // a TLSClientConfig turns it off otherwise
+				TLSClientConfig: &tls.Config{
+					// What a probe costs is mostly the TLS handshake, on a
+					// line that runs every 30 s around the clock. A resumed
+					// session skips the certificate chain (about 3.5 KB);
+					// no post-quantum key share saves 1.2 KB more (servers
+					// on OpenSSL 3.0 do not use it anyway, and a status
+					// check has nothing to keep secret).
+					ClientSessionCache: &sessionCache{every: fullHandshakeEvery, now: now},
+					CurvePreferences:   []tls.CurveID{tls.X25519, tls.CurveP256},
+				},
+			},
 		},
 	}
 	if m.interval <= 0 {
@@ -362,7 +388,7 @@ func (m *Module) probe(ctx context.Context, t Target) (rtt time.Duration, err er
 			mu.Unlock()
 		},
 	}
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodGet, t.HTTP, nil)
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), t.Method, t.HTTP, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -379,6 +405,42 @@ func (m *Module) probe(ctx context.Context, t Target) (rtt time.Duration, err er
 		return rtt, fmt.Errorf("HTTP %d（应为 %d）", resp.StatusCode, t.Expect)
 	}
 	return rtt, nil
+}
+
+// fullHandshakeEvery bounds how long probes resume TLS sessions: after it
+// the next probe of each server verifies its certificate chain again (an
+// expired certificate already ends a session at once).
+const fullHandshakeEvery = 10 * time.Minute
+
+// sessionCache is a TLS session cache that forgets everything every so
+// often, so that resumption saves traffic without hiding for long a server
+// that now presents a different certificate.
+type sessionCache struct {
+	every time.Duration
+	now   func() time.Time
+
+	mu    sync.Mutex
+	since time.Time
+	c     tls.ClientSessionCache
+}
+
+func (s *sessionCache) cache() tls.ClientSessionCache {
+	if now := s.now(); s.c == nil || now.Sub(s.since) >= s.every {
+		s.c, s.since = tls.NewLRUClientSessionCache(64), now
+	}
+	return s.c
+}
+
+func (s *sessionCache) Get(key string) (*tls.ClientSessionState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cache().Get(key)
+}
+
+func (s *sessionCache) Put(key string, cs *tls.ClientSessionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache().Put(key, cs)
 }
 
 // short trims Go's nested network errors to their gist for a chat line.

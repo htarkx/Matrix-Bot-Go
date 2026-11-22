@@ -86,6 +86,17 @@ keeps `getUpdates`. Probes run on every alert evaluation; `sustain` absorbs a
 single lost probe. HTTP probes do not follow redirects and verify TLS. Each
 target names the `host` it runs on: that machine is the subject of its alerts.
 
+**What a probe costs.** Probes run every 30 s around the clock, so their bytes
+add up (a few hundred MB a day at first, on metered VPS traffic). Each probe
+still opens a fresh connection, as a visitor would, but sends `HEAD` (set
+`"method": "GET"` on a target whose server does not answer HEAD), resumes the
+TLS session instead of receiving the certificate chain again (a full
+handshake, verifying the chain, at least every 10 minutes), and offers no
+post-quantum key share (1.2 KB per connection that servers on OpenSSL 3.0
+ignore anyway). Measured against five nginx sites and Google: 69.5 KB per
+round before, 8.7 KB after. The heaviest had been a login page answered with
+a 28 KB 401: nginx gzips only 200, 403 and 404 responses.
+
 **Latency: round trip vs. request.** Two figures, because they differ by
 design. *Round trip* (往返) is the TCP connect alone: one RTT, about what
 `ping` shows, and the same in both directions. *Request* (请求) is a whole
